@@ -1,7 +1,7 @@
 # head-tracker
 Routines for video tracking of gaze direction in the common marmoset.
 
-# What I will need
+## What I will need
 
 - DONE read frames sequentially one-by-one from video.
 - DONE display and manually annote frames.
@@ -18,24 +18,25 @@ Routines for video tracking of gaze direction in the common marmoset.
 - DONE Data check, i.e. plot/draw data on frames for visual check.
 - DONE Frame scaling.
 - A cool classifier.
+- DONE image windowing for sliding windows/head localization.
 - Automatically annote frames from classifier predictions.
 
-# PROBLEMS
+## Issues
 - Doesn't draw gaze line at pi and 3*pi/2.
 
-# Structure of Classifier code.
+## Structure of Classifier code.
 - Predictor
     * load weights
-    * moving window over frames
+    * DONE moving window over frames
     * best window selector
-- Trainer
+- DONE Trainer
     * save weights (load for accumulative training?)
-- Configure network
-- Split and randomize data
+- DONE Configure network
+- DONE Split and randomize data
     * load data
 
 
-# Classification strategy
+## Classification strategy
 1. A head detector on a window that is translated, rotated and scaled over all
    possible positions, rotations and scales. Best fit wins.
     - A bit dumb, probably too slow for real time application.
@@ -63,5 +64,5 @@ Routines for video tracking of gaze direction in the common marmoset.
       of possible positions and rotations are also smaller. I.e. the number
       of labels should be significantly less than for strategy 2.
 
-Strategy 2 is probably easiest to implement/test, and should thus be tried 1st.
+Testing strategy 3 first.
 
