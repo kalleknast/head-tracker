@@ -14,7 +14,7 @@ from video_tools import VideoReader
 from matplotlib import pyplot as plt
 from datetime import datetime
 from scipy.misc import imresize, imsave
-from scipy.spatial.distance import pdist
+from scipy.spatial.distance import pdist, squareform
 from time import sleep
 from glob import glob
 import numpy as np
@@ -230,7 +230,7 @@ class ManuallyAnnoteFrames:
                  'tuft_pos_left_x(px), tuft_pos_left_y(px), '
                  'tuft_pos_right_x(px), tuft_pos_right_y(px)\n' %
                  (self.start_t.strftime("%Y-%m-%d %H:%M:%S"),
-                  self.video_fname.split('/')[-1].split('.')[-2],
+                  self.video_fname.split('/')[-1],
                   self._head_backwrd_shift,
                   self._head_len_wdt_ratio,
                   self._head_scaling))
@@ -507,15 +507,35 @@ def plot_head_data(log_fname, video_fname):
     fstp.close()
 
 
-def train_data_to_storage(log_fname,
-                          video_dir,
-                          out_fname,
-                          mode='a',
-                          head_size=200,
-                          patch_size=32,
+def batch_train_data_to_storage(log_dir, video_dir, out_fname,
+                                max_patch_overlap=0.1, num_neg_per_pos=11):
+    """
+    Loads training data from all the log files in a directory.
+    """
+                    
+    
+    log_fnames = glob(log_dir.rstrip('/') + '/HeadData*.txt')
+
+    log_fname = log_fnames.pop(0)
+    train_data_to_storage(log_fname, video_dir, out_fname, mode='w',
+                          max_patch_overlap=max_patch_overlap,
+                          num_neg_per_pos=num_neg_per_pos)
+    for log_fname in log_fnames:
+        print(log_fname)
+        train_data_to_storage(log_fname, video_dir, out_fname, mode='a',
+                              max_patch_overlap=max_patch_overlap,
+                              num_neg_per_pos=num_neg_per_pos)
+                              
+    f = tables.openFile(out_fname, mode='r')
+    print('Number of positive exemplars entered: %d' 
+          % (f.root.labels[:,0]==1).sum())
+    f.close()
+
+
+def train_data_to_storage(log_fname, video_dir, out_fname, mode='a',
+                          head_size=200, patch_size=32,
                           max_patch_overlap=0.25,
-                          num_neg_per_pos=2,
-                          debug=False):
+                          num_neg_per_pos=2, debug=False):
     """
     Parameters
     ----------
@@ -559,16 +579,18 @@ def train_data_to_storage(log_fname,
             axs.append(fig.add_axes([0.501, 0.01, 0.49, 0.32]))       
              
     scale_factor = patch_size / head_size
-    min_dist_to_pos = patch_size * max_patch_overlap
+    min_dst_to_pos = patch_size * max_patch_overlap
 
     log_data, log_header = read_log_data(log_fname)
-    video_fname = '%s/%s*' % (video_dir.rstrip('/'), log_header['video_fname'])
+    video_fname = '%s/%s' % (video_dir.rstrip('/'), log_header['video_fname'])
     video_fname = glob(video_fname)
     if len(video_fname) != 1:
         print('The video file matching to the log cannot be found in %s'
               % video_dir)
-        print('Found:', video_fname)
+        print('Log file:', log_fname)
+        print('Found video files:', video_fname)
         return 0
+    log_fname = log_fname.split('/')[-1]
     fstp = FrameStepper(video_fname[0])
     frame = whiten(imresize(fstp.frame, scale_factor))
 
@@ -579,20 +601,15 @@ def train_data_to_storage(log_fname,
         atom_labels = tables.Atom.from_dtype(np.dtype(int))
         filters = tables.Filters(complib='blosc', complevel=5)
 
-        # TODO: remove pos_data, neg_data and head_angles
-        pos_data = f.createEArray(f.root, 'heads', atom_data,
-                                  shape=(patch_size, patch_size, 0),
-                                  filters=filters,
-                                  chunkshape=(patch_size, patch_size, 1))
-        head_angles = f.createEArray(f.root, 'head_angles', atom_labels,
-                                     shape=(1, 0),
-                                     filters=filters,
-                                     chunkshape=(1, 1))
-        neg_data = f.createEArray(f.root, 'no_heads', atom_data,
-                                  shape=(patch_size, patch_size, 0),
-                                  filters=filters,
-                                  chunkshape=(patch_size, patch_size, 1))
+        class tbl_spec(tables.IsDescription):
+            frm_n   = tables.IntCol(pos=1)        # int, frame number in video
+            log_fn  = tables.StringCol(50, pos=2) # 50-character str 
+                                                  # (48 seems to be max)
 
+
+        data_origin = f.create_table(f.root, 'data_origin', tbl_spec,
+                                     "Table with info about data origin")
+                                
         data = f.createEArray(f.root, 'data', atom_data,
                               shape=(0, patch_size, patch_size),
                               filters=filters,
@@ -600,18 +617,14 @@ def train_data_to_storage(log_fname,
         labels = f.createEArray(f.root, 'labels', atom_labels,
                                 shape=(0, 2),
                                 filters=filters,
-                                chunkshape=(1, 2))                              
+                                chunkshape=(1, 2))
     elif mode == 'a':
         ## Open existing file to append data.
-        pos_data = f.root.heads
-        head_angles = f.root.head_angles
-        neg_data = f.root.no_heads
         data = f.root.data
         labels = f.root.labels
+        data_origin = f.root.data_origin
 
     # Scale head positions and add padding
-    #import pdb
-    #pdb.set_trace()
     log_data['center_x'] = log_data['center_x'] * scale_factor
     log_data['center_y'] = log_data['center_y'] * scale_factor
     # Head angles to degrees (-180 to 180)
@@ -660,52 +673,41 @@ def train_data_to_storage(log_fname,
         pos_x, pos_y = dat['center_x'], dat['center_y']
         pos_patch = extract_patch(pos_x, pos_y, frame)
         
-        # TODO: remove pos_data
-        pos_data.append(pos_patch.reshape((patch_size, patch_size, 1)))
-
-        data.append(pos_patch.reshape((1, patch_size, patch_size)))
-        # head angle
-        # TODO: remove head angle
-        head_angles.append(np.array(dat['angle'], dtype=int).reshape((1, 1)))
-        
+        # Append data to storage file.        
         labels.append(np.array([1, dat['angle']], dtype=int).reshape((1, 2)))
+        data.append(pos_patch.reshape((1, patch_size, patch_size)))
+        data_origin.append([(dat['frame_num'], log_fname)])
 
         # Negative examples, i.e. background/no head
-        idx = np.random.randint(0, log_data.shape[0], num_neg_per_pos)
-        all_neg_x, all_neg_y = log_data['center_x'][idx], log_data['center_y'][idx]
-        ndists = num_neg_per_pos + num_neg_per_pos * (num_neg_per_pos+ - 1) - np.arange(num_neg_per_pos).sum()
-        #print(ndists)
-        ok = np.zeros(ndists, dtype=bool)        
-        intradists_x = pdist(all_neg_x.reshape(num_neg_per_pos, 1))
-        intradists_y = pdist(all_neg_y.reshape(num_neg_per_pos, 1))
-        ok[:num_neg_per_pos] = np.logical_and(np.abs(all_neg_x - pos_x) > min_dist_to_pos,
-                                              np.abs(all_neg_y - pos_y) > min_dist_to_pos)
-        ok[num_neg_per_pos:] = np.logical_and(intradists_x > min_dist_to_pos,
-                                              intradists_y > min_dist_to_pos)
-        while not ok.all():   # Check that the randomly drawn position are not
-                              # within head position in current frame.
-            idx = np.random.randint(0, log_data.shape[0], num_neg_per_pos)
-            all_neg_x, all_neg_y = log_data['center_x'][idx], log_data['center_y'][idx]
-            intradists_x = pdist(all_neg_x.reshape(num_neg_per_pos, 1))
-            intradists_y = pdist(all_neg_y.reshape(num_neg_per_pos, 1))
-            ok[:num_neg_per_pos] = np.logical_and(np.abs(all_neg_x - pos_x) > min_dist_to_pos,
-                                                  np.abs(all_neg_y - pos_y) > min_dist_to_pos)
-            ok[num_neg_per_pos:] = np.logical_and(intradists_x > min_dist_to_pos,
-                                                  intradists_y > min_dist_to_pos)
+        all_xy = np.zeros((num_neg_per_pos + 1, 2))
+        neg_idx = np.random.randint(0, log_data.shape[0], num_neg_per_pos)
+        all_xy[0, :] = pos_x, pos_y
+        all_xy[1:, 0] = log_data['center_x'][neg_idx]
+        all_xy[1:, 1] = log_data['center_y'][neg_idx]
+        ok = pdist(all_xy, metric='euclidean') > min_dst_to_pos
+        nok = squareform(~ ok).sum(axis=0)
+        while nok.any():  # Check that the randomly drawn position are
+                          # not within head position in current frame.
+            neg_idx = np.random.randint(0, log_data.shape[0], 1)
+            # Always keep the positive (pos_x, pos_y)
+            all_xy[1:, 0][nok[1:].argmax()] = log_data['center_x'][neg_idx]
+            all_xy[1:, 1][nok[1:].argmax()] = log_data['center_y'][neg_idx]
+            ok = pdist(all_xy, metric='euclidean') > min_dst_to_pos
+            nok = squareform(~ ok).sum(axis=0)           
 
         j = 2
-        for neg_x, neg_y in zip(all_neg_x, all_neg_y):
+        for neg_x, neg_y in all_xy[1:]:
             neg_patch = extract_patch(neg_x, neg_y, frame)
-            # TODO: remove neg_data
-            neg_data.append(neg_patch.reshape((patch_size, patch_size, 1)))
+            # Append data to storage file.
             labels.append(np.array([0, 0], dtype=int).reshape((1, 2)))
             data.append(neg_patch.reshape((1, patch_size, patch_size)))
+            data_origin.append([(dat['frame_num'], log_fname)])
             if debug and j < 6:
                 axs[j].imshow(neg_patch, origin='lower', cmap=plt.cm.gray)
                 j += 1
 
         if debug:
-            axs[0].plot(all_neg_x, all_neg_y, 'or')
+            axs[0].plot(all_xy[1:, 0], all_xy[1:, 1], 'or')
             axs[0].plot(pos_x, pos_y, 'og')
             axs[1].imshow(pos_patch, origin='lower', cmap=plt.cm.gray)
             for ax in axs:
@@ -745,6 +747,7 @@ def check_training_data(fname, n):
     no_heads = f.root.no_heads[:, :, n: max_i]
 
     def tile_images(A3d, shape):
+        # TODO: do it w reshape instead of loops.
         h, w, n = A3d.shape
         im = np.empty(shape, dtype=A3d.dtype)
         nr = shape[0]//h

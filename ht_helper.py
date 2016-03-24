@@ -16,8 +16,20 @@ def whiten(X):
     As tensorflow.image.per_image_whitening(image)
     https://www.tensorflow.org/versions/r0.7/api_docs/python/image.html#per_image_whitening
     """
-    adjusted_std = max(X.std(), 1.0/np.sqrt(X.size))
-    return (X - X.mean()) / adjusted_std
+    if X.ndim == 3:
+        Y = X.reshape((X.shape[0], -1))
+        m = Y.mean(axis=1)
+        adjusted_std = np.concatenate((Y.std(axis=1),
+                                       np.repeat(1.0/np.sqrt(Y.shape[1]),
+                                                 Y.shape[0])))
+        adjusted_std = adjusted_std.reshape((-1, 2)).max(axis=1)   
+        adjusted_std = adjusted_std.repeat(np.prod(X.shape[-2:])).reshape(X.shape)
+        m = m.repeat(np.prod(X.shape[-2:])).reshape(X.shape)        
+    else:
+        adjusted_std = max(X.std(), 1.0/np.sqrt(X.size))
+        m = X.mean()
+
+    return (X - m) / adjusted_std
 
 
 def get_input(q_str, ans_type, default=None, check=False):
@@ -116,8 +128,8 @@ def window_image(A, window_shape, offset=(0, 0), end='cut', padvalue=0):
     
     Hjalmar K. Turesson, 2016-03-12
     """
-    wr, wc = window_shape[0], window_shape[1]    
-    r0, c0 = offset[0], offset[1]   
+    wr, wc = window_shape
+    r0, c0 = offset
     
     if end == 'cut':
 
@@ -135,8 +147,8 @@ def window_image(A, window_shape, offset=(0, 0), end='cut', padvalue=0):
         lft_pad = - min(c0, 0)
         r0 = max(offset[0], 0)
         c0 = max(offset[1], 0)
-        r1 = int(r0 + wr * np.ceil(m / wr))
-        c1 = int(c0 + wc * np.ceil(n / wc))        
+        r1 = int(r0 + wr * np.ceil((m - r0) / wr))
+        c1 = int(c0 + wc * np.ceil((n - c0) / wc))
         btm_pad = max(r1 - m, 0)
         rgt_pad = max(c1 - n, 0)
         
