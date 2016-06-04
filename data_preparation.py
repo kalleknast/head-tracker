@@ -6,14 +6,11 @@ Created on Wed Feb  3 14:33:25 2016
 """
 
 
-from ht_helper import get_input, whiten
-# Tensorflow has to be imported before Gtk (VideoReader)
-# see https://github.com/tensorflow/tensorflow/issues/1373
-#import tensorflow as tf
-from video_tools import VideoReader
+from ht_helper import get_input, whiten, window_and_whiten, FrameStepper
+from ht_helper import MultiResolutionPyramid, closest_coordinate
 from matplotlib import pyplot as plt
 from datetime import datetime
-from scipy.misc import imresize, imsave
+from scipy.misc import imresize
 from scipy.spatial.distance import pdist, squareform
 from time import sleep
 from glob import glob
@@ -23,94 +20,6 @@ import tables
 import sys
 
 warnings.simplefilter("ignore")
-
-
-class FrameStepper:
-
-    def __init__(self, fname):
-        """
-        """
-        self.vr = VideoReader(fname)
-        self.dt = 1/self.vr.fps
-        self.frame = self.vr.get_frame(0.0)
-        self.t = self.vr.get_current_position(fmt='time')
-        self.n = self.vr.get_current_position(fmt='frame_number')
-        self.tot_n = self.vr.duration_nframes
-        self.duration = self.vr.duration_seconds
-
-    def read_t(self, t):
-        """
-        Read a frame at t. t has to be >= to 0,
-        and <= the total video duration.
-        """
-        self.frame = self.vr.get_frame(t)
-        self.t = self.vr.get_current_position(fmt='time')
-        self.n = self.vr.get_current_position(fmt='frame_number')
-        if self.n is None:
-            self.n = self.t*self.vr.fps
-
-    def read_frame(self, frame_num):
-        """
-        Read frame number frame_num. frame_num has to be >= to 0,
-        and <= the total number of frames in video.
-        """
-        self.read_t(self, frame_num / self.vr.fps)
-
-    def next(self):
-        """
-        Reads next frame.
-        Cannot be last frame.
-        """
-        self.frame = self.vr.get_next_frame()
-        self.t = self.vr.get_current_position(fmt='time')
-        self.n = self.vr.get_current_position(fmt='frame_number')
-
-        if self.n is None:
-            self.n = self.t*self.vr.fps
-
-    def previous(self):
-        """
-        Reads previous frame.
-        Current frame cannot the first (i.e. t = 0 and n = 1).
-        """
-        if (self.t - self.dt < 0) or (self.n == 1):
-            print('Frame NOT updated!\n'
-                  'The current frame is already the first.\n'
-                  'Previous frame does not exist.')
-        else:
-            self.frame = self.vr.get_frame(self.t - self.dt)
-            self.t = self.vr.get_current_position(fmt='time')
-            self.n = self.vr.get_current_position(fmt='frame_number')
-            if self.n is None:
-                self.n = self.t*self.vr.fps
-
-    def jump_t(self, jump_dur):
-        """
-        Jumps some duration of time from current time.
-        The jump duration plus the current time has to be less than the
-        total video duration.
-        """
-        t1 = self.vr.get_current_position(fmt='time')
-        self.frame = self.vr.get_frame(t1 + jump_dur)
-        self.t = self.vr.get_current_position(fmt='time')
-        self.n = self.vr.get_current_position(fmt='frame_number')
-        if self.n is None:
-            self.n = self.t*self.vr.fps
-
-    def jump_nf(self, nframes):
-        """
-        Jump some number of frames from current frame.
-        The number of frames to jump plus the current frame number needs to be
-        less than the total number of frames in the video.
-        """
-        jump_dur = nframes*self.dt
-        self.jump_t(jump_dur)
-
-    def close(self):
-        """
-        Close the video.
-        """
-        self.vr.close()
 
 
 class ManuallyAnnoteFrames:
@@ -360,9 +269,38 @@ class ManuallyAnnoteFrames:
 
     def close(self):
         """
+        
         """
         self.fstp.vr.close()
         self.f.close()
+
+
+def get_gaze_line(angle, x, y, r, units='rad'):
+    """
+    Parameters
+    ----------
+    angle
+    x
+    y
+    r
+    units : Units of "angle", "rad" for radians or "deg" for degrees.
+    
+    Returns
+    -------
+    gzl_x
+    gzl_y
+    """  
+    if units == 'rad':
+        gzl_x = [x, x + r * np.cos(angle)]
+        gzl_y = [y, y + r * np.sin(angle)]
+    elif units == 'deg':
+        gzl_x = [x, x + r * np.cos(np.deg2rad(angle))]
+        gzl_y = [y, y + r * np.sin(np.deg2rad(angle))]
+    else:
+        print('"units" has to be "rad" or "deg"')
+        return 0
+    
+    return gzl_x, gzl_y
 
 
 def draw_head_position_and_angle(ax, imwdt, imhgt, head_backwrd_shift, data):
@@ -397,6 +335,8 @@ def draw_head_position_and_angle(ax, imwdt, imhgt, head_backwrd_shift, data):
         xdist_lim = - hp_x + 10
     # y-dim 0 is at top of image
     xdist, ydist = data['forehead_pos_x'] - hp_x, data['forehead_pos_y'] - hp_y
+    # TODO: try to replace with get_gaze_line
+    # or at least check that (ydist_lim / ydist) * ydist really is neccessary
     gaze_pos_x = hp_x + (ydist_lim / ydist) * ydist / np.tan(angle)
     gaze_pos_y = hp_y + (xdist_lim / xdist) * xdist * np.tan(angle)
     # Fixing gaze line so that it doesn't end outside of image.
@@ -418,7 +358,6 @@ def draw_head_position_and_angle(ax, imwdt, imhgt, head_backwrd_shift, data):
 
     # Get position of box around head.
     bx_wdt, bx_lngt = data['box_width'], data['box_height']
-    angle = data['angle']
     # left side
     l_x = hp_x + (bx_wdt/2) * np.cos(angle + np.pi/2)
     l_y = hp_y + (bx_wdt/2) * np.sin(angle + np.pi/2)
@@ -532,11 +471,568 @@ def batch_train_data_to_storage(log_dir, video_dir, out_fname,
     f.close()
 
 
-def train_data_to_storage(log_fname, video_dir, out_fname, mode='a',
-                          head_size=200, patch_size=32,
-                          max_patch_overlap=0.25,
-                          num_neg_per_pos=2, debug=False):
+def traindata2storage_centeredgrid(log_fname, video_dir, out_fname, mode='a',
+                                   head_size=200, patch_size=32,
+                                   patch_overlap=0.5, plot=False, plot_dir='.'):
     """
+    Parameters
+    ----------
+    log_fname
+    video_dir
+    out_fname
+    head_size
+    patch_size
+    patch_overlap
+    plot
+    plot_dir
+    """
+    
+    # TODO: remove hard coded frame sizes
+    # number of patches over the width of frame
+    n_patch_w = int(np.ceil(640 / head_size))
+    # number of patches over the height of frame
+    n_patch_h = int(np.ceil(480 / head_size))
+
+    scale_factor = patch_size / head_size
+
+    log_data, log_header = read_log_data(log_fname)
+    video_fname = '%s/%s' % (video_dir.rstrip('/'), log_header['video_fname'])
+    video_fname = glob(video_fname)
+    if len(video_fname) != 1:
+        print('The video file matching to the log cannot be found in %s'
+              % video_dir)
+        print('Log file:', log_fname)
+        print('Found video files:', video_fname)
+        return 0
+    log_fname = log_fname.split('/')[-1]
+    fstp = FrameStepper(video_fname[0])
+    
+    if plot:
+        pltdat = {'dir': plot_dir.rstrip('/'), 'poverlap': patch_overlap,
+                  'np_w': n_patch_w, 'np_h': n_patch_h, 'p_sz': patch_size}
+        pltdat = plt_traindata2storage_grid(pltdat, ptype='prepare')
+
+    # HDF5 storage of the data
+    f = tables.openFile(out_fname, mode=mode)
+    if mode == 'w':  # Write new file -- OVERWRITES!
+        atom_data = tables.Atom.from_dtype(fstp.frame.dtype)
+        atom_labels = tables.Atom.from_dtype(np.dtype(int))
+        filters = tables.Filters(complib='blosc', complevel=5)
+
+        class tbl_spec(tables.IsDescription):
+            frm_n   = tables.IntCol(pos=1)        # int, frame number in video
+            log_fn  = tables.StringCol(50, pos=2) # 50-character str 
+                                                  # (48 seems to be max)
+
+
+        data_origin = f.create_table(f.root, 'data_origin', tbl_spec,
+                                     "Table with info about data origin")
+                                
+        data = f.createEArray(f.root, 'data', atom_data,
+                              shape=(0, patch_size, patch_size),
+                              filters=filters,
+                              chunkshape=(patch_size, patch_size, 1))
+        labels = f.createEArray(f.root, 'labels', atom_labels,
+                                shape=(0, 2),
+                                filters=filters,
+                                chunkshape=(1, 2))
+    elif mode == 'a':
+        # Open existing file to append data.
+        data = f.root.data
+        labels = f.root.labels
+        data_origin = f.root.data_origin
+
+    # Scale head positions to fit rescaled frames.
+    log_data['center_x'] = log_data['center_x'] * scale_factor
+    log_data['center_y'] = log_data['center_y'] * scale_factor
+    # Head angles to degrees (-180 to 180)
+    log_data['angle'] = (180 * (log_data['angle'] / np.pi)).round()
+
+    for i, dat in enumerate(log_data):
+        # Counter printed on the command line
+        s = '%04d' % (log_data.shape[0] - i)
+        sys.stdout.write(s)
+        sys.stdout.flush()
+        sys.stdout.write('\b'*len(s))
+        # Read the frame
+        #frame_num = dat['frame_num']
+        fstp.read_t(dat['frame_time'])
+        frame = imresize(fstp.frame.mean(axis=2), scale_factor)
+                
+        if plot:
+            plt_traindata2storage_grid(pltdat, ptype='clear')
+            pltdat['frame'] = frame
+            plt_traindata2storage_grid(pltdat, ptype='show_frame')
+
+        # Location of positive example, i.e. head
+        pos_x, pos_y = dat['center_x'], dat['center_y']
+        # offsets for patch extraction
+        offset_c = pos_x - patch_size / 2
+        offset_c = int(round(min(np.mod(offset_c, patch_size), offset_c))) #- 32
+        offset_r = pos_y - patch_size / 2
+        offset_r = int(round(min(np.mod(offset_r, patch_size), offset_r))) #- 32
+        step = int(patch_overlap * patch_size)
+
+        for offs_r in range(offset_r, offset_r + patch_size, step):
+            for offs_c in range(offset_c, offset_c + patch_size, step):
+                patches, centers = window_and_whiten(frame,
+                                                     (patch_size, patch_size),
+                                                     [offs_r, offs_c])
+                ppix = np.logical_and(abs(centers[:, 0] - pos_y) < 2,
+                                      abs(centers[:, 1] - pos_x) < 2)
+                npatch = patches.shape[0]
+                if ppix.any():
+                    pos_patch = patches[ppix, :, :]
+                    # Append data to storage file.        
+                    labels.append(np.array([1, dat['angle']], dtype=int).reshape((1, 2)))
+                    data.append(pos_patch.reshape((1, patch_size, patch_size)))
+                    data_origin.append([(dat['frame_num'], log_fname)])
+
+                # Negative examples, i.e. background/no head
+                neg_patch_ids = np.nonzero(~ ppix)[0]  
+                for npix in neg_patch_ids:
+                    neg_patch = patches[npix, :, :]
+                    # Append data to storage file.
+                    labels.append(np.array([0, 0], dtype=int).reshape((1, 2)))
+                    data.append(neg_patch.reshape((1, patch_size, patch_size)))
+                    data_origin.append([(dat['frame_num'], log_fname)])
+            
+                if plot:
+                    pltdat['npatch'], pltdat['dat'] = npatch, dat
+                    pltdat['patches'], pltdat['centers'] = patches, centers
+                    pltdat['ppix'], pltdat['neg_patch_ids'] = ppix, neg_patch_ids
+                    plt_traindata2storage_grid(pltdat, ptype='show_patches')
+                #
+        if plot:
+            pltdat['i'] = i
+            plt_traindata2storage_grid(pltdat, ptype='save_fig')
+            if not get_input('Continue', bool, default=True):
+                print('Quitting')
+                fstp.close()
+                f.close()
+                return
+
+    fstp.close()
+    f.close()
+
+
+def traindata2storage_grid(log_fname, video_dir, out_fname, head_size=200,
+                           mode='a', patch_size=32, align_grid2head = False,
+                           patch_overlap=0.5, plot=False, plot_dir='.'):
+    """
+    Parameters
+    ----------
+    log_fname
+    video_dir
+    out_fname
+    head_size
+    patch_size
+    patch_overlap
+    plot
+    plot_dir
+    """
+    
+    # TODO: remove hard coded frame sizes
+    # number of patches over the width of frame
+    n_patch_w = int(np.ceil(640 / head_size))
+    # number of patches over the height of frame
+    n_patch_h = int(np.ceil(480 / head_size))
+    scale_factor = patch_size / head_size
+    max_dist2head = np.ceil(patch_size * patch_overlap/2)
+
+    log_data, log_header = read_log_data(log_fname)
+    video_fname = '%s/%s' % (video_dir.rstrip('/'), log_header['video_fname'])
+    video_fname = glob(video_fname)
+    if len(video_fname) != 1:
+        print('The video file matching to the log cannot be found in %s'
+              % video_dir)
+        print('Log file:', log_fname)
+        print('Found video files:', video_fname)
+        return 0
+    log_fname = log_fname.split('/')[-1]
+    fstp = FrameStepper(video_fname[0])
+    
+    if plot:
+        pltdat = {'dir': plot_dir.rstrip('/'), 'poverlap': patch_overlap,
+                  'np_w': n_patch_w, 'np_h': n_patch_h, 'p_sz': patch_size}
+        pltdat = plt_traindata2storage_grid(pltdat, ptype='prepare')
+
+    # HDF5 storage of the data
+    f = tables.openFile(out_fname, mode=mode)
+    if mode == 'w':  # Write new file -- OVERWRITES!
+        atom_data = tables.Atom.from_dtype(fstp.frame.dtype)
+        atom_labels = tables.Atom.from_dtype(np.dtype(int))
+        filters = tables.Filters(complib='blosc', complevel=5)
+
+        class tbl_spec(tables.IsDescription):
+            frm_n   = tables.IntCol(pos=1)        # int, frame number in video
+            log_fn  = tables.StringCol(50, pos=2) # 50-character str 
+                                                  # (48 seems to be max)
+
+
+        data_origin = f.create_table(f.root, 'data_origin', tbl_spec,
+                                     "Table with info about data origin")
+                                
+        data = f.createEArray(f.root, 'data', atom_data,
+                              shape=(0, patch_size, patch_size),
+                              filters=filters,
+                              chunkshape=(patch_size, patch_size, 1))
+        labels = f.createEArray(f.root, 'labels', atom_labels,
+                                shape=(0, 2),
+                                filters=filters,
+                                chunkshape=(1, 2))
+    elif mode == 'a':
+        # Open existing file to append data.
+        data = f.root.data
+        labels = f.root.labels
+        data_origin = f.root.data_origin
+
+    # Scale head positions to fit rescaled frames.
+    log_data['center_x'] = log_data['center_x'] * scale_factor
+    log_data['center_y'] = log_data['center_y'] * scale_factor
+    # Head angles to degrees (-180 to 180)
+    log_data['angle'] = (180 * (log_data['angle'] / np.pi)).round()
+
+    for i, dat in enumerate(log_data):
+        # Counter printed on the command line
+        s = '%04d' % (log_data.shape[0] - i)
+        sys.stdout.write(s)
+        sys.stdout.flush()
+        sys.stdout.write('\b'*len(s))
+        # Read the frame
+        #frame_num = dat['frame_num']
+        fstp.read_t(dat['frame_time'])
+        frame = imresize(fstp.frame.mean(axis=2), scale_factor)
+                
+        if plot:
+            plt_traindata2storage_grid(pltdat, ptype='clear')
+            pltdat['frame'] = frame
+            plt_traindata2storage_grid(pltdat, ptype='show_frame')
+
+        # Location of positive example, i.e. head
+        pos_x, pos_y = dat['center_x'], dat['center_y']
+        # offsets for patch extraction
+        if align_grid2head:
+            offset_c = pos_x - patch_size / 2
+            offset_c = int(round(min(np.mod(offset_c, patch_size), offset_c)))
+            offset_r = pos_y - patch_size / 2
+            offset_r = int(round(min(np.mod(offset_r, patch_size), offset_r)))
+        else:
+            offset_c = -int((frame.shape[1]/patch_size - frame.shape[1]//patch_size) * patch_size/2)
+            offset_r = -int((frame.shape[0]/patch_size - frame.shape[0]//patch_size) * patch_size/2)
+        #print('offset_c:',offset_c, 'offset_r:',offset_r)
+        step = int(patch_overlap * patch_size)
+
+        for offs_r in range(offset_r, offset_r + patch_size, step):
+            for offs_c in range(offset_c, offset_c + patch_size, step):
+                patches, centers = window_and_whiten(frame,
+                                                     (patch_size, patch_size),
+                                                     [offs_r, offs_c])
+                ppix = np.logical_and(abs(centers[:, 0] - pos_y) < max_dist2head,
+                                      abs(centers[:, 1] - pos_x) < max_dist2head)
+                npatch = patches.shape[0]
+                if ppix.any():
+                    pos_patch = patches[ppix, :, :]
+                    # Append data to storage file.        
+                    labels.append(np.array([1, dat['angle']], dtype=int).reshape((1, 2)))
+                    data.append(pos_patch.reshape((1, patch_size, patch_size)))
+                    data_origin.append([(dat['frame_num'], log_fname)])
+
+                # Negative examples, i.e. background/no head
+                neg_patch_ids = np.nonzero(~ ppix)[0]  
+                for npix in neg_patch_ids:
+                    neg_patch = patches[npix, :, :]
+                    # Append data to storage file.
+                    labels.append(np.array([0, 0], dtype=int).reshape((1, 2)))
+                    data.append(neg_patch.reshape((1, patch_size, patch_size)))
+                    data_origin.append([(dat['frame_num'], log_fname)])
+            
+                if plot:
+                    pltdat['npatch'], pltdat['dat'] = npatch, dat
+                    pltdat['patches'], pltdat['centers'] = patches, centers
+                    pltdat['ppix'], pltdat['neg_patch_ids'] = ppix, neg_patch_ids
+                    plt_traindata2storage_grid(pltdat, ptype='show_patches')
+                #
+        if plot:
+            pltdat['i'] = i
+            plt_traindata2storage_grid(pltdat, ptype='save_fig')
+            if not get_input('Continue', bool, default=True):
+                print('Quitting')
+                fstp.close()
+                f.close()
+                return
+
+    fstp.close()
+    f.close()
+
+
+def labelledData2storage_mrp_batch(log_dir, video_dir, out_fname):
+    """
+    Loads training data from all the log files in a directory.
+    
+    Trying to maximize resolution while minimizing the number of windows/patches
+    to classify per video fram using a Multi Resolution Pyramid.
+    """
+                    
+    
+    log_fnames = glob(log_dir.rstrip('/') + '/HeadData*.txt')
+
+    log_fname = log_fnames.pop(0)
+    print(log_fname)
+    labeledData2storage_mrp(log_fname, video_dir, out_fname, mode='w')
+
+    for log_fname in log_fnames:
+        print(log_fname)
+        labeledData2storage_mrp(log_fname, video_dir, out_fname, mode='a')
+                              
+    f = tables.openFile(out_fname, mode='r')
+    Npos = (f.root.labels0[:,0]==1).sum()
+    Nneg = (f.root.labels0[:,0]==0).sum()
+    print('number of POSITIVE exemplars: %d\n'
+          'number of NEGATIVE exemplars: %d' % (Npos, Nneg))
+    f.close()
+
+
+def labeledData2storage_mrp(log_fname, video_dir, out_fname,
+                            mode='a', plot=False, plot_dir='.'):
+    """
+    Trying to maximize resolution while minimizing the number of windows/patches
+    to classify per video fram using a Multi Resolution Pyramid.
+    
+    Parameters
+    ----------
+    log_fname
+    video_dir
+    out_fname
+    head_size
+    patch_size
+    plot
+    plot_dir
+    """
+    
+    head_size = 200
+    patch_sz = [48, 32, 32, 32]
+    scale_factor = patch_sz[1] / head_size  # TODO improve this 
+
+    log_data, log_header = read_log_data(log_fname)
+    video_fname = '%s/%s' % (video_dir.rstrip('/'), log_header['video_fname'])
+    video_fname = glob(video_fname)
+    if len(video_fname) != 1:
+        print('The video file matching to the log cannot be found in %s'
+              % video_dir)
+        print('Log file:', log_fname)
+        print('Found video files:', video_fname)
+        return 0
+    log_fname = log_fname.split('/')[-1]
+    # To read the frames
+    fstp = FrameStepper(video_fname[0])
+    # For patch extraction
+    mrp = MultiResolutionPyramid()
+    
+    # HDF5 storage of the data
+    f = tables.openFile(out_fname, mode=mode)
+    if mode == 'w':  # Write new file -- OVERWRITES!
+        atom_data = tables.Atom.from_dtype(fstp.frame.dtype)
+        atom_labels = tables.Atom.from_dtype(np.dtype(int))
+        filters = tables.Filters(complib='blosc', complevel=5)
+
+        class tbl_spec(tables.IsDescription):
+            frm_n   = tables.IntCol(pos=1)        # int, frame number in video
+            log_fn  = tables.StringCol(50, pos=2) # 50-character str 
+                                                  # (48 seems to be max)
+        data_src, data, labels = [], [], []
+        for k in range(mrp.N_levels):
+            data_src_title = "Info about the source of data from Level %d" % k
+            data_src.append(f.create_table(f.root, ('data%d_src' % k),
+                                           tbl_spec, title=data_src_title))
+
+            data_title = 'Image patches from Level %d of the multi-resolution pyramid' % k
+            data.append(f.createEArray(f.root, ('data%d' % k), atom_data,
+                                       shape=(0, patch_sz[k], patch_sz[k]),
+                                       title=data_title, filters=filters,
+                                       chunkshape=(patch_sz[k], patch_sz[k], 1)))
+
+            labels_title = 'Labels for level %d image patches of the multi-resolution pyramid' % k
+            labels.append(f.createEArray(f.root, ('labels%d' % k), atom_labels,
+                          shape=(0, 2), title=labels_title,
+                          filters=filters, chunkshape=(1, 2)))
+                          
+    elif mode == 'a':
+        # Open existing file to append data.
+        data_src, data, labels = [], [], []
+        for k in range(mrp.N_levels):
+            eval('data_src.append(f.root.%s)' % ('data%d_src' % k))
+            eval('data.append(f.root.%s)' % ('data%d' % k))
+            eval('labels.append(f.root.%s)' % ('labels%d' % k))
+
+    # Scale head positions to fit rescaled frames.
+    log_data['center_x'] = log_data['center_x'] * scale_factor
+    log_data['center_y'] = log_data['center_y'] * scale_factor
+    # Head angles to degrees (-180 to 180)
+    log_data['angle'] = (180 * (log_data['angle'] / np.pi)).round()
+
+    for i, dat in enumerate(log_data):
+        # Counter printed on the command line
+        s = '%04d' % (log_data.shape[0] - i)
+        sys.stdout.write(s)
+        sys.stdout.flush()
+        sys.stdout.write('\b'*len(s))
+        # Read the frame
+        fstp.read_t(dat['frame_time'])
+        frame = imresize(fstp.frame.mean(axis=2), scale_factor)
+        # Location of positive example, i.e. head
+        pos_x, pos_y = dat['center_x'], dat['center_y']
+        mrp.start(frame)
+        c, cj = closest_coordinate(pos_y, pos_x, mrp.levels[0].centers)
+        for j, patch in enumerate(mrp.levels[0].wins):
+            if mrp.levels[0].valid[j]:
+                # Append data to storage file.
+                pp = int(j == cj)  # 1 -> Positive Patch, ie w. head, 0 -> no head
+                labels[0].append(np.array([pp, dat['angle']], dtype=int).reshape((1, 2)))
+                data[0].append(patch.reshape((1, patch_sz[0], patch_sz[0])))
+                data_src[0].append([(dat['frame_num'], log_fname)])
+        
+        for k in range(1, mrp.N_levels):
+            mrp.next(c)
+            c, cj = closest_coordinate(pos_y, pos_x, mrp.levels[k].centers)
+
+            for j, patch in enumerate(mrp.levels[k].wins):
+                if mrp.levels[k].valid[j]:                
+                    # Append data to storage file.
+                    pp = int(j == cj)  # 1 -> Positive Patch, ie w. head, 0 -> no head
+                    labels[k].append(np.array([pp, dat['angle']], dtype=int).reshape((1, 2)))
+                    data[k].append(patch.reshape((1, patch_sz[k], patch_sz[k])))
+                    data_src[k].append([(dat['frame_num'], log_fname)])
+
+        if plot:
+            mrp.levels[-1].head_position['x'] = c[1]
+            mrp.levels[-1].head_position['y'] = c[0]
+            mrp.plot(level='all', true_hp={'x': pos_x, 'y': pos_y},
+                     fname=('%s/mrp_hp%03d.png' % (plot_dir, i)))
+            #if not get_input('Continue', bool, default=True):
+            #if i > 4:
+             #   print('Quitting')
+              #  fstp.close()
+               # f.close()
+                #return
+
+    fstp.close()
+    f.close()
+
+
+def plt_traindata2storage_grid(pltdat, ptype):
+    """
+    """
+    
+    if ptype == 'prepare':
+        
+        np_w = pltdat['np_w']
+        np_h = pltdat['np_h']
+        poverlap = pltdat['poverlap']          
+        pltdat['axs'] = []
+        pltdat['linecm'] = plt.cm.hot.from_list('jet', ['r', 'b'], N=(1/poverlap)**2-1)
+        pltdat['fig'] = plt.figure(figsize=[11.4125, 8.525])
+        # complete frame
+        # upper left quarter
+        pltdat['axs'].append(pltdat['fig'].add_axes([0.01, 0.51, 0.48, 0.48]))
+        # patches
+        sp_w, sp_h = 0.48 / np_w, 0.48 / np_h
+        # upper right quarter
+        for x in np.linspace(0.51, 0.99 - sp_w, np_w):
+            for y in np.linspace(0.51, 0.99 - sp_h, np_h):
+                pltdat['axs'].append(pltdat['fig'].add_axes([x, y, sp_w, sp_h]))
+        # lower left quarter
+        for x in np.linspace(0.01, 0.49-sp_w, np_w):
+            for y in np.linspace(0.01, 0.49-sp_h, np_h):
+                pltdat['axs'].append(pltdat['fig'].add_axes([x, y, sp_w, sp_h]))
+        # lower right quarter
+        for x in np.linspace(0.51, 0.99-sp_w, np_w):
+            for y in np.linspace(0.01, 0.49-sp_h, np_h):
+                pltdat['axs'].append(pltdat['fig'].add_axes([x, y, sp_w, sp_h]))
+
+    elif ptype == 'clear':
+        
+        pltdat['k'] = 1
+        
+        for ax in pltdat['axs']:
+            ax.cla()
+            ax.set_xticks([])
+            ax.set_yticks([])
+            
+    elif ptype == 'show_frame':
+        
+        pltdat['axs'][0].imshow(pltdat['frame'],
+                               origin='lower',
+                               cmap=plt.cm.gray)
+        pltdat['axs'][0].set_xlim([0, pltdat['frame'].shape[1]])
+        pltdat['axs'][0].set_ylim([0, pltdat['frame'].shape[0]])
+    
+    elif ptype == 'show_patches':
+        
+        k = pltdat['k']
+        n = pltdat['npatch']
+        axs = pltdat['axs']    
+        ps = pltdat['patches']
+        cs = pltdat['centers']
+        p_sz = pltdat['p_sz']
+        ppix = pltdat['ppix']
+        pos_x = pltdat['dat']['center_x']
+        pos_y = pltdat['dat']['center_y']
+        angle = pltdat['dat']['angle']
+        npids = pltdat['neg_patch_ids']
+
+        lclr = pltdat['linecm']((k // n) / pltdat['linecm'].N)
+        ls = ':'
+        if ppix.any():
+            axs[0].plot(cs[ppix, 1], cs[ppix, 0], 'og')
+            pltdat['axs'][0].plot(pos_x, pos_y, 'o', mec='g',
+                                  mew='1', ms=16, mfc='none')
+            ls = '--'
+    
+        axs[0].plot(cs[npids, 1], cs[npids, 0], 'or')                    
+        rows = np.r_[cs[:, 0] + p_sz/2, cs[:, 0] - p_sz/2]
+        cols = np.r_[cs[:, 1] + p_sz/2, cs[:, 1] - p_sz/2]
+        xlim, ylim = axs[0].get_xlim(), axs[0].get_ylim()
+
+        for r in np.unique(rows):
+            axs[0].plot(xlim, [r+0.33*((k // n) / pltdat['linecm'].N - 0.5),
+                               r+0.33*((k // n) / pltdat['linecm'].N - 0.5)],
+                        ls=ls, c=lclr, zorder=1)
+        for c in np.unique(cols):
+            axs[0].plot([c+(k-1)//cs.shape[0] - 1.5, 
+                         c+(k-1)//cs.shape[0] - 1.5],
+                         ylim, ls=ls, c=lclr, zorder=1)
+                
+        if (k + n <= len(axs)):
+            for i in range(n):
+                axs[i + k].imshow(ps[i, :, :], origin='lower',
+                                  cmap=plt.cm.gray, clim=[-2, 2])
+                axs[i + k].plot([0, p_sz-1,],[0,0], c=lclr, ls=ls)
+                axs[i + k].plot([0, p_sz-1], [p_sz-1,p_sz-1], c=lclr, ls=ls)
+                axs[i + k].plot([0, 0], [0, p_sz-1], c=lclr, ls=ls)
+                axs[i + k].plot([p_sz-1, p_sz-1], [0, p_sz-1], c=lclr, ls=ls)
+
+                if i == ppix.nonzero()[0]:  # Mark head patch and angle
+                    gzl_x, gzl_y = get_gaze_line(angle, p_sz/2, p_sz/2, 0.4*p_sz, units='deg')
+                    axs[i + k].plot(gzl_x, gzl_y, '-g')
+                    axs[i + k].text(gzl_x[0], gzl_y[0], '%d' % angle, color='w')
+                    axs[i + k].plot(p_sz/2, p_sz/2, 'og')
+                                 
+        pltdat['k'] = k + n
+            
+    elif ptype == 'save_fig':
+        pltdat['fig'].savefig('%s/hp%03d.png' % (pltdat['dir'], pltdat['i']))
+        
+    return pltdat
+
+
+def traindata2storage_biased(log_fname, video_dir, out_fname, mode='a',
+                             head_size=200, patch_size=32,
+                             max_patch_overlap=0.25,
+                             num_neg_per_pos=2, debug=False):
+    """
+    Sample negative patches from ...
+    
     Parameters
     ----------
     log_fname
@@ -579,6 +1075,7 @@ def train_data_to_storage(log_fname, video_dir, out_fname, mode='a',
             axs.append(fig.add_axes([0.501, 0.01, 0.49, 0.32]))       
              
     scale_factor = patch_size / head_size
+    # Min distance to positive sample
     min_dst_to_pos = patch_size * max_patch_overlap
 
     log_data, log_header = read_log_data(log_fname)
@@ -592,7 +1089,8 @@ def train_data_to_storage(log_fname, video_dir, out_fname, mode='a',
         return 0
     log_fname = log_fname.split('/')[-1]
     fstp = FrameStepper(video_fname[0])
-    frame = whiten(imresize(fstp.frame, scale_factor))
+    # TODO: check that below can be removed
+    #frame = whiten(imresize(fstp.frame, scale_factor))
 
     # HDF5 storage of the data
     f = tables.openFile(out_fname, mode=mode)
@@ -628,7 +1126,7 @@ def train_data_to_storage(log_fname, video_dir, out_fname, mode='a',
     log_data['center_x'] = log_data['center_x'] * scale_factor
     log_data['center_y'] = log_data['center_y'] * scale_factor
     # Head angles to degrees (-180 to 180)
-    log_data['angle'] = (360 * (log_data['angle'] / np.pi)).round()
+    log_data['angle'] = (180 * (log_data['angle'] / np.pi)).round()
 
     def extract_patch(x, y, frm):
         """
@@ -722,8 +1220,8 @@ def train_data_to_storage(log_fname, video_dir, out_fname, mode='a',
 
     fstp.close()
     f.close()
-
-
+    
+    
 def check_training_data(fname, n):
     """
     Visually check the training data.
