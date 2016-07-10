@@ -1,10 +1,38 @@
 # head-tracker
-Routines for video tracking of gaze direction in the common marmoset.
 
-## What I will need
+## What it is
+Routines for video tracking of head position and orientation in the common marmoset. KNOWING POS AND ORIENT TELLS US WHERE THEY LOOK BC... SACCADES, HEAD SACCADES. That is, these routines to estimate where the subject is and roughly where it is looking using only a webcam.
 
+## What it does
+
+## How it works
+
+## Example usage
+- Label training data
+```
+from data_preparation import LabelFrames
+video_fname = '/full/path/to/some/video/file.mkv'
+lf = LabelFrames(video_fname)
+
+lf.run_batch(t0=2.3)   # time of 1st frame to label in seconds
+```
+- Extract training data and store in tfrecords format.
+```
+log_dir = '/directory/where/log/files/are/stored/'
+video_dir = '/directory/where/video/files/are/stored/'
+out_base_fname = 'name'  # TODO names will be like this...
+out_dir = '/directory/where/training/and/dev/data/will/be/stored'
+labeledData2storage_mrp(log_dir, video_dir, out_base_fname, out_dir, plot=False, plot_dir='.', Nplot=500)
+```
+- Train the position classifier/tracker
+
+
+## Further information
+
+## In progress
 - DONE read frames sequentially one-by-one from video.
 - DONE display and manually annote frames.
+
     * the reward plate is minimum 20 degrees wide.
     * 10 degree bins would be great.
     * 10 deg bins -> 36 bins
@@ -21,22 +49,10 @@ Routines for video tracking of gaze direction in the common marmoset.
 - DONE image windowing for sliding windows/head localization.
 - Automatically annote frames from classifier predictions.
 
-## Issues
+# Issues
 - Doesn't draw gaze line at pi and 3*pi/2.
 
-## Structure of Classifier code.
-- Predictor
-    * load weights
-    * DONE moving window over frames
-    * best window selector
-- DONE Trainer
-    * save weights (load for accumulative training?)
-- DONE Configure network
-- DONE Split and randomize data
-    * load data
-
-
-## Classification strategy
+# Classification strategy
 1. A head detector on a window that is translated, rotated and scaled over all
    possible positions, rotations and scales. Best fit wins.
     - A bit dumb, probably too slow for real time application.
