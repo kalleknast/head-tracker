@@ -13,30 +13,100 @@ import numpy as np
 # see https://github.com/tensorflow/tensorflow/issues/1373
 #import tensorflow as tf
 from video_tools import VideoReader
+import matplotlib
+matplotlib.use('Agg')
 from matplotlib import pyplot as plt
 import matplotlib.patches as patches
 
 
-def whiten(X):
+def get_window(image,  win_sz,  center):
     """
-    As tensorflow.image.per_image_whitening(image)
-    https://www.tensorflow.org/versions/r0.7/api_docs/python/image.html#per_image_whitening
-    """
-    if X.ndim == 3:
-        Y = X.reshape((X.shape[0], -1))
-        m = Y.mean(axis=1)
-        adjusted_std = np.concatenate((Y.std(axis=1),
-                                       np.repeat(1.0/np.sqrt(Y.shape[1]),
-                                                 Y.shape[0])))
-        adjusted_std = adjusted_std.reshape((-1, 2)).max(axis=1)   
-        adjusted_std = adjusted_std.repeat(np.prod(X.shape[-2:])).reshape(X.shape)
-        m = m.repeat(np.prod(X.shape[-2:])).reshape(X.shape)        
-    else:
-        adjusted_std = max(X.std(), 1.0/np.sqrt(X.size))
-        m = X.mean()
+    center - (r, c)
+    """    
+    im_nr, im_nc = image.shape  # number of rows, columns in image
+    w_sz = win_sz
+    #centers = self.levels[k].centers
+    win = np.empty((win_sz,  win_sz))
+    ir0 = int(round(center[0]-w_sz/2))
+    ir1 = int(round(center[0]+w_sz/2))
+    ic0 = int(round(center[1]-w_sz/2))
+    ic1 = int(round(center[1]+w_sz/2))
 
-    return (X - m) / adjusted_std
+    if (ir0 < 0) and (ic0 < 0):
+        tmp = image[:ir1, :ic1]
+        # Whiten
+        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
+        # subtract mean and divide by standard deviation
+        win[-ir0:, -ic0:] = (tmp - tmp.mean()) / adj_std
+        # pad with white noise
+        win[:, :-ic0] = np.random.standard_normal(size=(w_sz, -ic0))
+        win[:-ir0, :] = np.random.standard_normal(size=(-ir0, w_sz))
+    elif (ir0 < 0) and ((ic0 >= 0) and (ic1 <= im_nc)):
+        tmp = image[:ir1, ic0:ic1]
+        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
+        win[-ir0:, :] = (tmp - tmp.mean()) / adj_std
+        win[:-ir0, :] = np.random.standard_normal(size=(-ir0, w_sz))
+    elif (ir0 < 0) and (ic1 > im_nc):
+        tmp = image[:ir1, ic0:]
+        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
+        win[-ir0:, :im_nc-ic0] = (tmp - tmp.mean()) / adj_std
+        win[:, im_nc-ic0:] = np.random.standard_normal(size=(w_sz, w_sz-tmp.shape[1]))
+        win[:-ir0, :] = np.random.standard_normal(size=(-ir0, w_sz))
+    elif ((ir0 >= 0) and (ir1 <= im_nr)) and (ic0 < 0):
+        tmp = image[ir0:ir1, :ic1]
+        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
+        win[:, -ic0:] = (tmp - tmp.mean()) / adj_std
+        win[:, :-ic0] = np.random.standard_normal(size=(w_sz, -ic0))
+    elif ((ir0 >= 0) and (ir1 <= im_nr)) and ((ic0 >= 0) and (ic1 <= im_nc)):
+        tmp = image[ir0:ir1, ic0:ic1]
+        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
+        win[:, :] = (tmp - tmp.mean()) / adj_std
+    elif ((ir0 >= 0) and (ir1 <= im_nr)) and (ic1 > im_nc):
+        tmp = image[ir0:ir1, ic0:]
+        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
+        win[:, :im_nc-ic0] = (tmp - tmp.mean()) / adj_std
+        win[:, im_nc-ic0:] = np.random.standard_normal(size=(w_sz, w_sz-tmp.shape[1]))
+    elif (ir1 > im_nr) and (ic0 < 0):
+        tmp = image[ir0:, :ic1]
+        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
+        win[:im_nr-ir0, -ic0:] = (tmp - tmp.mean()) / adj_std
+        win[:, :-ic0] = np.random.standard_normal(size=(w_sz, -ic0))
+        win[im_nr-ir0:, :] = np.random.standard_normal(size=(w_sz-tmp.shape[0], w_sz))
+    elif (ir1 > im_nr) and((ic0 >= 0) and (ic1 <= im_nc)):
+        tmp = image[ir0:, ic0:ic1]
+        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
+        win[:im_nr-ir0, :] = (tmp - tmp.mean()) / adj_std
+        win[im_nr-ir0:, :] = np.random.standard_normal(size=(w_sz-tmp.shape[0], w_sz))
+    elif (ir1 > im_nr) and (ic1 > im_nc):
+        tmp = image[ir0:, ic0:]
+        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
+        win[:im_nr-ir0, :im_nc-ic0] = (tmp - tmp.mean()) / adj_std
+        win[:, im_nc-ic0:] = np.random.standard_normal(size=(w_sz, w_sz-tmp.shape[1]))
+        win[im_nr-ir0:, :] = np.random.standard_normal(size=(w_sz-tmp.shape[0], w_sz))
+    
+    return win
 
+#
+#def whiten(X):
+#    """
+#    As tensorflow.image.per_image_whitening(image)
+#    https://www.tensorflow.org/versions/r0.7/api_docs/python/image.html#per_image_whitening
+#    """
+#    if X.ndim == 3:
+#        Y = X.reshape((X.shape[0], -1))
+#        m = Y.mean(axis=1)
+#        adjusted_std = np.concatenate((Y.std(axis=1),
+#                                       np.repeat(1.0/np.sqrt(Y.shape[1]),
+#                                                 Y.shape[0])))
+#        adjusted_std = adjusted_std.reshape((-1, 2)).max(axis=1)   
+#        adjusted_std = adjusted_std.repeat(np.prod(X.shape[-2:])).reshape(X.shape)
+#        m = m.repeat(np.prod(X.shape[-2:])).reshape(X.shape)        
+#    else:
+#        adjusted_std = max(X.std(), 1.0/np.sqrt(X.size))
+#        m = X.mean()
+#
+#    return (X - m) / adjusted_std
+#
 
 def get_input(q_str, ans_type, default=None, check=False):
     """
@@ -427,15 +497,15 @@ class FrameStepper:
 def closest_coordinate(r, c, coordinates):
     """
     Parameters
-    ----------
-    x
-    y
+    ----------------
+    r                    - row index
+    c                   - column index
     coordinates  - 2-d numpy.array of row and column indexes.
                    centers[:, 0] -- row indexes
                    centers[:, 1] -- columns indexes
                    Eg np.array([[r0, c0], [r1, c1], [r2, c2]])
     Returns
-    -------
+    -----------
     c        -    the center/coordinates closest to (r, c)
     i        -    index of c in centers
     """
@@ -444,6 +514,53 @@ def closest_coordinate(r, c, coordinates):
     c = coordinates[i, :]
     
     return c, i
+
+    
+def dist2coordinates(r, c, coordinates):
+    """
+    Returns the coordinate with minimum distance to r & c,
+    and those coordinates with distances within 129% of the minimum distance.
+    
+    129% is chosen because the smallest patch is 32x32 and the overlap is 50%.
+    If the head is located on the line between two neighboring patches the 
+    longest distance to the closest patch will be 8 (equidistant between the 2).
+    The ratio of the distances will be 8/8 = 1. If the head but shifted 1 element
+    (ie the smallest possible shift) towards one of them, the ratio of their 
+    distances will be (8+1)/(8-1) = 1.2857... (if the head is shifted 2 elements
+    the ratio will be (8+2/(8-2) = 1.666... ).
+    In the cases where 
+
+    Parameters
+    ----------------
+    r                    - row index
+    c                   - column index
+    coordinates  - 2-d numpy.array of row and column indexes.
+                   centers[:, 0] -- row indexes
+                   centers[:, 1] -- columns indexes
+                   Eg np.array([[r0, c0], [r1, c1], [r2, c2]])
+    Returns
+    d
+    i          - index of d in coordinates.
+    -----------
+
+    """
+
+    dists = np.sqrt(((coordinates - [r,  c])**2).sum(axis=1))
+    sorted_idx = np.argsort(dists)
+    dists = dists[sorted_idx]
+    min_dist = dists.min()
+    if min_dist == 0:
+        norm_dists = dists/1
+    else:
+        norm_dists = dists/dists.min()        
+
+    #d = dists[norm_dists < 1.67]
+    #i = sorted_idx[norm_dists < 1.67]
+    d = dists[norm_dists < 1.3]
+    i = sorted_idx[norm_dists < 1.3]    
+    
+    return d,  i
+
 
 class MultiResolutionPyramid:
     """
@@ -454,18 +571,22 @@ class MultiResolutionPyramid:
         """
 
         self.im_shape = (76, 102)
-        self.N_levels = 4
+        self.Nlevels = 4
         self.im_nrow = self.im_shape[0]
         self.im_ncol = self.im_shape[1]
-        self.head_position = np.recarray(self.N_levels, dtype=[('x', float),('y', float)])
+        self.head_position = np.recarray(self.Nlevels, dtype=[('x', float),('y', float)])
         self.head_position[:] = np.nan
-        self.resolution = np.zeros(self.N_levels) + np.nan
+        self.resolution = np.zeros(self.Nlevels) + np.nan
         self.level_done = -1
         self.levels = []
         
         class levelClass:
-            def __init__(self, nwin_r, nwin_c, win_sz):
+            def __init__(self, level,  nwin_r, nwin_c, win_sz):
+                self.Nclass = 2
+                self.level = level
                 self.win_sz = int(win_sz)
+                self.win_nr = int(win_sz)
+                self.win_nc = int(win_sz)
                 self.nwin_r = int(nwin_r)
                 self.nwin_c = int(nwin_c)
                 self.nwin = int(nwin_r * nwin_c)
@@ -477,18 +598,19 @@ class MultiResolutionPyramid:
                 self.centers = np.empty((self.nwin, 2))
                 self.wins = np.empty((self.nwin, win_sz, win_sz))
                 self.head_position = {'x': None, 'y': None}
+                self.estimated_head_position = None
  
         # Level 0
         #nwin = 5+3+5 # 1st row: 5 wins; 2nd row: 3 wins; 3rd row: 5 wins.
         nwin_r, nwin_c = 3, 4 # 3 rows x 4 columns
         win_sz = 48
-        self.levels.append(levelClass(nwin_r, nwin_c, win_sz))
+        self.levels.append(levelClass(0,  nwin_r, nwin_c, win_sz))
         self.levels[-1].step = int(win_sz/2)
         # level 1, 2 and 3
         nwin_r, nwin_c = 3, 3 # 3 rows x 4 columns
         win_sz = 32
-        for _ in range(1, self.N_levels):
-            self.levels.append(levelClass(nwin_r, nwin_c, win_sz))
+        for i in range(1, self.Nlevels):
+            self.levels.append(levelClass(i,  nwin_r, nwin_c, win_sz))
             self.levels[-1].step = self.levels[-2].step/2
             self.levels[-1].subim_sz = self.levels[-2].step + win_sz        
 
@@ -497,7 +619,7 @@ class MultiResolutionPyramid:
         """
         """
         if im.shape != self.im_shape:
-            ValueError('Argument "im" needs to have shape (%d, %d)' % self.im_sz)
+            raise ValueError('Argument "im" needs to have shape (%d, %d)' % self.im_sz)
         
         self.im = im
 
@@ -547,16 +669,17 @@ class MultiResolutionPyramid:
 
     def next(self, head_position):
         """
+        head_position -- (row ("y"), column ("x"))
         """
-        if self.level_done == self.N_levels - 1:
+        if self.level_done == self.Nlevels - 1:
             print('Max resolution reached.\nBest head position estimate is '
                   'x = %1.1f and y = %1.1f.' % (self.head_position.x[-2],
                                                 self.head_position.y[-2]))
             return 0
             
-        if ((head_position[1] < 0) or (head_position[1] > self.im_nrow) or 
-            (head_position[0] < 0) or (head_position[0] > self.im_ncol)):
-            ValueError('Argument "center" needs to be within shape of "im".')
+        if ((head_position[0] < 0) or (head_position[0] > self.im_nrow) or 
+            (head_position[1] < 0) or (head_position[1] > self.im_ncol)):
+            raise ValueError('Argument "center" needs to be within shape of "im".')
         
         if self.level_done < 0:
             print('start() needs to be run before.')
@@ -675,7 +798,7 @@ class MultiResolutionPyramid:
             self.levels[2].ax = fig.add_axes([0.025, 0.025, 0.465, 0.465])
             self.levels[3].ax = fig.add_axes([0.51, 0.025, 0.465, 0.465])
 
-            for level in range(self.N_levels):
+            for level in range(self.Nlevels):
                 self._plot_level(level, true_hp=true_hp)
                 
         else:
@@ -684,7 +807,7 @@ class MultiResolutionPyramid:
                 self.levels[level].ax = fig.add_subplot(111)
                 self._plot_level(level, true_hp=true_hp)
             except:
-                ValueError('Argument "level" must be either the string "all"'
+                raise ValueError('Argument "level" must be either the string "all"'
                            'or 0 to 3 as int, string or float.')
         
         if not fname is None:
@@ -700,6 +823,7 @@ class MultiResolutionPyramid:
         step = self.levels[level].step
         valid = self.levels[level].valid
         centers = self.levels[level].centers[valid]
+        est_hp = self.levels[level].estimated_head_position
         hp = self.levels[level].head_position
         si_sz = self.levels[level].subim_sz
         si_r = self.levels[level].subim_pos['r']
@@ -730,12 +854,22 @@ class MultiResolutionPyramid:
             i += 1
 
         if not hp['x'] is None:
-            i = np.argmin(np.abs(centers - [[hp['y'],hp['x']]]).sum(axis=1))
-            ax.plot(hp['x'], hp['y'], marker='o', ms=10, mfc='none',
-                    mew='2', mec=[0.5, 1, 0.1])
-            x0, y0 = hp['x'] - w_sz/2, hp['y'] - w_sz/2
-            ax.add_patch(patches.Rectangle((x0, y0), w_sz, w_sz,
-                                           fill=False, ls='dashed', ec=cm(i)))
+            if not est_hp is None:
+                dj = dist2coordinates(true_hp['y'], true_hp['x'], centers)[1]
+                for i,  hp in enumerate(est_hp):
+                    ax.plot(hp['x'], hp['y'], marker='o', ms=10,
+                                mfc='none', mew='1', mec=[0.5, 1, 0.1])
+                    x0, y0 = hp['x'] - w_sz/2, hp['y'] - w_sz/2
+                    ax.add_patch(patches.Rectangle((x0, y0), w_sz, w_sz,
+                                                fill=False, ls='dashed', ec=cm(dj[i])))
+            else:
+                i = closest_coordinate(true_hp['y'], true_hp['x'], centers)[1]
+                x0, y0 = hp['x'] - w_sz/2, hp['y'] - w_sz/2
+                ax.add_patch(patches.Rectangle((x0, y0), w_sz, w_sz,
+                                        fill=False, ls='dashed', ec=cm(i)))
+
+            ax.plot(hp['x'], hp['y'], marker='o', ms=10,
+                        mfc='none', mew='2', mec=[0.5, 1, 0.1])                                        
 
         ax.set_xticks([])
         ax.set_yticks([])
@@ -748,188 +882,173 @@ class MultiResolutionPyramid:
             ax.set_xlim(xlim)
             ax.set_ylim(ylim)
 
-    
-def window_and_whiten(im, window_shape, offset=(0, 0)):
-    """
-    Whitens the windows individually before padding with white noise.
-    Whiten -- subtract mean and divide by standard deviation.
 
-    Parameters
-    ----------
-    im           : 2-d numpy.array to window.
-    window_shape : window shape (num_rows, num_columns)
-    offset       : [row, column] list offsets where to place the upper left
-                   corner of the first window.
-                   The other windows follow this offset.
-
-    Returns
-    -------
-    wins         : 3-d array of windows with shape
-                   (num_windows, window_shape[0], window_shape[1])
-    centers      : 2-array of row & column centers of the windows in the
-                   original array im.
-    
-    Hjalmar K Turesson, 2016-05-12
-    """
-    im_nr, im_nc = im.shape  # number of rows, columns in image
-    w_h, w_w = window_shape  # window height, width
-    # Number of rows columns in "win"
-    w_nr, w_nc = np.ceil(im_nr / w_h) * w_h, np.ceil(im_nc / w_w) * w_w
-    
-    #print('before:',offset)
-    # Adjust offset
-    if ((im_nr - offset[0]) / w_h) < (np.ceil(im_nr / w_h) - 1):
-        offset[0] -= w_h
-    if ((im_nc - offset[1]) / w_w) < (np.ceil(im_nc / w_w) - 1):
-        offset[1] -= w_w
-    #print('after:', offset)
-    # Row indeci of windows in im. Start indeci.
-    im_r0 = np.arange(offset[0], min(im_nr + offset[0], im_nr), w_h)
-    im_r0[0] = max(im_r0[0], 0)  # 1st index cannot be < 0, ie outside im.
-    # End indeci.
-    im_r1 = np.arange(im_r0[1], im_r0[-1] + w_h + 1, w_h)
-    im_r1[-1] = min(im_r1[-1], im_nr)  # Last index cannot be > num rows, ie outside im.
-    # Column indeci of windows in im.
-    im_c0 = np.arange(offset[1], min(im_nc+offset[1], im_nc), w_w)
-    im_c0[0] = max(im_c0[0], 0)
-    im_c1 = np.arange(im_c0[1], im_c0[-1] + w_w + 1, w_w)
-    im_c1[-1] = min(im_c1[-1], im_nc)
-    # Row indeci of windows in wins (2-d array that later will be reshaped
-    # to the appropriate 3-d output array).
-    win_r0 = im_r0 - offset[0]  # Row start indecei of windows.
-    win_r1 = im_r1 - offset[0]  # Row end indecei of windoes.
-    win_r1[-1] = min(win_r1[-1], w_nr)  # Lastt index cannot be outside of wins
-    # Column indeci of windows in wins.
-    win_c0 = im_c0 - offset[1]    
-    win_c1 = im_c1 - offset[1]
-    win_c1[-1] = min(win_c1[-1], w_nc)
-    
-    #print('win_c0:', win_c0)
-    #print('win_c1:', win_c1)
-    #print('im_c0:', im_c0)
-    #print('im_c1:', im_c1)
-
-    # 2-d array to hold the whitened windows, will later be reshaped to
-    # the output 3-d array
-    wins = np.random.standard_normal(size=(w_nr, w_nc))
-    # Whiten each window individually
-    for i in range(im_r0.shape[0]):
-        for j in range(im_c0.shape[0]):
-            try:
-                win = im[im_r0[i] : im_r1[i], im_c0[j] : im_c1[j]]  # Extract window
-                adjusted_std = max(win.std(), 1.0 / np.sqrt(win.size))  # std
-                # subtract mean and divide by standard deviation
-                wins[win_r0[i]: win_r1[i], win_c0[j]: win_c1[j]] = (win - win.mean()) / adjusted_std
-            except:
-                import pdb
-                pdb.set_trace()
-
-    # Reshape wins to 3-d, 1st step
-    try:
-        wins = wins.reshape(w_nr/w_h, w_h, w_nc/w_w, w_w).transpose(2, 0, 1, 3)
-    except:
-        import pdb
-        pdb.set_trace()
-    # Locations of window centers in the original array.
-    # rows, columns
-    n, m = wins.shape[:2]
-    centers = np.zeros((m * n, 2), dtype=int)
-    cr0 = offset[0] + w_h // 2
-    cr1 = cr0 + (m - 1) * w_h
-    centers[:, 0] = np.tile(np.arange(cr0, cr1+1, w_h), n)
-    cc0 = offset[1] + w_w // 2
-    cc1 = cc0 + (n - 1) * w_w
-    centers[:, 1] = np.repeat(np.arange(cc0, cc1+1, w_w), m, axis=0)
-
-    return wins.reshape((-1, w_h, w_w)), centers  # Reshape, last step
-
-
-def window_image(A, window_shape, offset=(0, 0), end='cut', padvalue=0):
-    """
-    OBS!
-    DOES NOT WHITEN THE WINDOWS BEFORE PADDING W. WHITE NOISE!
-    
-    Returns adjacent, non-overlapping, windows of an 2-d array.
-    For overlapping windows, call window_image repeatedly with different
-    offsets.
-
-    Parameters
-    ----------
-    A            : 2-d numpy.array to window.
-    window_shape : window shape (num_rows, num_columns)
-    offset       : (row, column) offsets where to place the upper left corner
-                   of the first window. The other windows follow this offset.
-    end          : "cut" or "pad"
-    padvalue     : A number for constant padding,
-                   or the string "white" for white noise padding.
-    Returns:
-    --------
-    B           : 3-d array of windows with shape
-                  (num_windows, window_shape[0], window_shape[1])
-    centers     : 2-array of row & column centers of the windows in the
-                  original array A.
-    
-    Hjalmar K. Turesson, 2016-03-12
-    """
-    wr, wc = window_shape
-    r0, c0 = offset
-    
-    if end == 'cut':
-
-        if (r0 < 0) or (c0 < 0):
-            raise ValueError("If end=='cut', then offsets have to be greater "
-                             "of equal to zero")
-        m, n = A[r0:, c0:].shape
-        r1 = r0 + wr * (m // wr)
-        c1 = c0 + wc * (n // wc)
-        
-    elif end == 'pad':
-
-        m, n = A.shape
-        top_pad = - min(r0, 0)
-        lft_pad = - min(c0, 0)
-        r0 = max(offset[0], 0)
-        c0 = max(offset[1], 0)
-        r1 = int(r0 + wr * np.ceil((m - r0) / wr))
-        c1 = int(c0 + wc * np.ceil((n - c0) / wc))
-        btm_pad = max(r1 - m, 0)
-        rgt_pad = max(c1 - n, 0)
-        
-        if padvalue == 'white':
-            pv = 0.0  # dummy, white noise is set below.
-        else:
-            pv = padvalue
-
-        A = np.pad(A, ((top_pad, btm_pad), (lft_pad, rgt_pad)),
-                   mode='constant',
-                   constant_values=pv)
-        
-        if padvalue == 'white':     # White noise
-            
-            m, n = A.shape
-            if top_pad:
-                r0 = 0
-                A[:top_pad, :] = np.random.standard_normal(size=(top_pad, n))
-            if btm_pad:
-                A[-btm_pad:, :] = np.random.standard_normal(size=(btm_pad, n))
-            if lft_pad:
-                c0 = 0
-                A[:, :lft_pad] = np.random.standard_normal(size=(m, lft_pad))
-            if rgt_pad:
-                A[:, -rgt_pad:] = np.random.standard_normal(size=(m, rgt_pad))
-
-    m, n = A[r0: r1, c0: c1].shape
-    A = A[r0: r1, c0: c1].reshape(m/wr, wr, n/wc, wc).transpose(2, 0, 1, 3)
-    
-    # Locations of window centers in the original array.
-    # rows, columns
-    n, m = A.shape[:2]
-    centers = np.zeros((m * n, 2), dtype=int)
-    cr0 = offset[0] + wr // 2
-    cr1 = cr0 + (m - 1) * wr
-    centers[:, 0] = np.tile(np.arange(cr0, cr1+1, wr), n)
-    cc0 = offset[1] + wc // 2
-    cc1 = cc0 + (n - 1) * wc
-    centers[:, 1] = np.repeat(np.arange(cc0, cc1+1, wc), m, axis=0)
-
-    return A.reshape((-1, wr, wc)), centers
+#def window_and_whiten(im, window_shape, offset=(0, 0)):
+#    """
+#    Whitens the windows individually before padding with white noise.
+#    Whiten -- subtract mean and divide by standard deviation.
+#
+#    Parameters
+#    ----------
+#    im           : 2-d numpy.array to window.
+#    window_shape : window shape (num_rows, num_columns)
+#    offset       : [row, column] list offsets where to place the upper left
+#                   corner of the first window.
+#                   The other windows follow this offset.
+#
+#    Returns
+#    -------
+#    wins         : 3-d array of windows with shape
+#                   (num_windows, window_shape[0], window_shape[1])
+#    centers      : 2-array of row & column centers of the windows in the
+#                   original array im.
+#    
+#    Hjalmar K Turesson, 2016-05-12
+#    """
+#    im_nr, im_nc = im.shape  # number of rows, columns in image
+#    w_h, w_w = window_shape  # window height, width
+#    # Number of rows columns in "win"
+#    w_nr, w_nc = np.ceil(im_nr / w_h) * w_h, np.ceil(im_nc / w_w) * w_w
+#    
+#    # Adjust offset
+#    if ((im_nr - offset[0]) / w_h) < (np.ceil(im_nr / w_h) - 1):
+#        offset[0] -= w_h
+#    if ((im_nc - offset[1]) / w_w) < (np.ceil(im_nc / w_w) - 1):
+#        offset[1] -= w_w
+#    # Row indeci of windows in im. Start indeci.
+#    im_r0 = np.arange(offset[0], min(im_nr + offset[0], im_nr), w_h)
+#    im_r0[0] = max(im_r0[0], 0)  # 1st index cannot be < 0, ie outside im.
+#    # End indeci.
+#    im_r1 = np.arange(im_r0[1], im_r0[-1] + w_h + 1, w_h)
+#    im_r1[-1] = min(im_r1[-1], im_nr)  # Last index cannot be > num rows, ie outside im.
+#    # Column indeci of windows in im.
+#    im_c0 = np.arange(offset[1], min(im_nc+offset[1], im_nc), w_w)
+#    im_c0[0] = max(im_c0[0], 0)
+#    im_c1 = np.arange(im_c0[1], im_c0[-1] + w_w + 1, w_w)
+#    im_c1[-1] = min(im_c1[-1], im_nc)
+#    # Row indeci of windows in wins (2-d array that later will be reshaped
+#    # to the appropriate 3-d output array).
+#    win_r0 = im_r0 - offset[0]  # Row start indecei of windows.
+#    win_r1 = im_r1 - offset[0]  # Row end indecei of windoes.
+#    win_r1[-1] = min(win_r1[-1], w_nr)  # Lastt index cannot be outside of wins
+#    # Column indeci of windows in wins.
+#    win_c0 = im_c0 - offset[1]    
+#    win_c1 = im_c1 - offset[1]
+#    win_c1[-1] = min(win_c1[-1], w_nc)
+#    
+#    # 2-d array to hold the whitened windows, will later be reshaped to
+#    # the output 3-d array
+#    wins = np.random.standard_normal(size=(w_nr, w_nc))
+#    # Whiten each window individually
+#    for i in range(im_r0.shape[0]):
+#        for j in range(im_c0.shape[0]):
+#            win = im[im_r0[i] : im_r1[i], im_c0[j] : im_c1[j]]  # Extract window
+#            adjusted_std = max(win.std(), 1.0 / np.sqrt(win.size))  # std
+#            # subtract mean and divide by standard deviation
+#            wins[win_r0[i]: win_r1[i], win_c0[j]: win_c1[j]] = (win - win.mean()) / adjusted_std
+#
+#    # Reshape wins to 3-d, 1st step
+#    wins = wins.reshape(w_nr/w_h, w_h, w_nc/w_w, w_w).transpose(2, 0, 1, 3)
+#    # Locations of window centers in the original array.
+#    # rows, columns
+#    n, m = wins.shape[:2]
+#    centers = np.zeros((m * n, 2), dtype=int)
+#    cr0 = offset[0] + w_h // 2
+#    cr1 = cr0 + (m - 1) * w_h
+#    centers[:, 0] = np.tile(np.arange(cr0, cr1+1, w_h), n)
+#    cc0 = offset[1] + w_w // 2
+#    cc1 = cc0 + (n - 1) * w_w
+#    centers[:, 1] = np.repeat(np.arange(cc0, cc1+1, w_w), m, axis=0)
+#
+#    return wins.reshape((-1, w_h, w_w)), centers  # Reshape, last step
+#
+#
+#def window_image(A, window_shape, offset=(0, 0), end='cut', padvalue=0):
+#    """
+#    OBS!
+#    DOES NOT WHITEN THE WINDOWS BEFORE PADDING W. WHITE NOISE!
+#    
+#    Returns adjacent, non-overlapping, windows of an 2-d array.
+#    For overlapping windows, call window_image repeatedly with different
+#    offsets.
+#
+#    Parameters
+#    ----------
+#    A            : 2-d numpy.array to window.
+#    window_shape : window shape (num_rows, num_columns)
+#    offset       : (row, column) offsets where to place the upper left corner
+#                   of the first window. The other windows follow this offset.
+#    end          : "cut" or "pad"
+#    padvalue     : A number for constant padding,
+#                   or the string "white" for white noise padding.
+#    Returns:
+#    --------
+#    B           : 3-d array of windows with shape
+#                  (num_windows, window_shape[0], window_shape[1])
+#    centers     : 2-array of row & column centers of the windows in the
+#                  original array A.
+#    
+#    Hjalmar K. Turesson, 2016-03-12
+#    """
+#    wr, wc = window_shape
+#    r0, c0 = offset
+#    
+#    if end == 'cut':
+#
+#        if (r0 < 0) or (c0 < 0):
+#            raise ValueError("If end=='cut', then offsets have to be greater "
+#                             "of equal to zero")
+#        m, n = A[r0:, c0:].shape
+#        r1 = r0 + wr * (m // wr)
+#        c1 = c0 + wc * (n // wc)
+#        
+#    elif end == 'pad':
+#
+#        m, n = A.shape
+#        top_pad = - min(r0, 0)
+#        lft_pad = - min(c0, 0)
+#        r0 = max(offset[0], 0)
+#        c0 = max(offset[1], 0)
+#        r1 = int(r0 + wr * np.ceil((m - r0) / wr))
+#        c1 = int(c0 + wc * np.ceil((n - c0) / wc))
+#        btm_pad = max(r1 - m, 0)
+#        rgt_pad = max(c1 - n, 0)
+#        
+#        if padvalue == 'white':
+#            pv = 0.0  # dummy, white noise is set below.
+#        else:
+#            pv = padvalue
+#
+#        A = np.pad(A, ((top_pad, btm_pad), (lft_pad, rgt_pad)),
+#                   mode='constant',
+#                   constant_values=pv)
+#        
+#        if padvalue == 'white':     # White noise
+#            
+#            m, n = A.shape
+#            if top_pad:
+#                r0 = 0
+#                A[:top_pad, :] = np.random.standard_normal(size=(top_pad, n))
+#            if btm_pad:
+#                A[-btm_pad:, :] = np.random.standard_normal(size=(btm_pad, n))
+#            if lft_pad:
+#                c0 = 0
+#                A[:, :lft_pad] = np.random.standard_normal(size=(m, lft_pad))
+#            if rgt_pad:
+#                A[:, -rgt_pad:] = np.random.standard_normal(size=(m, rgt_pad))
+#
+#    m, n = A[r0: r1, c0: c1].shape
+#    A = A[r0: r1, c0: c1].reshape(m/wr, wr, n/wc, wc).transpose(2, 0, 1, 3)
+#    
+#    # Locations of window centers in the original array.
+#    # rows, columns
+#    n, m = A.shape[:2]
+#    centers = np.zeros((m * n, 2), dtype=int)
+#    cr0 = offset[0] + wr // 2
+#    cr1 = cr0 + (m - 1) * wr
+#    centers[:, 0] = np.tile(np.arange(cr0, cr1+1, wr), n)
+#    cc0 = offset[1] + wc // 2
+#    cc1 = cc0 + (n - 1) * wc
+#    centers[:, 1] = np.repeat(np.arange(cc0, cc1+1, wc), m, axis=0)
+#
+#    return A.reshape((-1, wr, wc)), centers
