@@ -7,10 +7,11 @@ Created on Tue Mar  8 15:17:35 2016
 
 import tensorflow as tf
 #from ht_helper import FrameStepper  # Import has to come after tensorflow bc bug/crash
-from ht_helper import MultiResolutionPyramid, closest_coordinate,  FrameStepper
+from ht_helper import MultiResolutionPyramid, angle2class,  FrameStepper,  class2angle
+from ht_helper import get_window,  angles2complex,  complex2angles,  get_gaze_line
 from data_preparation import read_log_data
 import numpy as np
-
+import re
 from scipy.misc import imresize
 from glob import glob
 import matplotlib
@@ -18,25 +19,23 @@ matplotlib.use('Agg')
 import matplotlib.pyplot as plt
 import matplotlib.patches as patches
 import matplotlib.animation as manimation
-import time
+#import time
 
-class TrainHeadTrackerMRP:
+class TrainPositionModel:
     """
     """
-    def __init__(self, train_fname=None,  valid_fname=None,  model_dir=None):
+    def __init__(self, data_dir=None,  model_dir=None):
     
-        if train_fname is None:
-            train_fname = '/home/hjalmar/head_tracker/data/train_ht_overlap_level1.tfrecords'
-        if valid_fname is None:
-            valid_fname = '/home/hjalmar/head_tracker/data/valid_ht_overlap_level1.tfrecords'
-
+        if data_dir is None:
+            data_dir = '/home/hjalmar/head_tracker/data'
+        self.data_dir = data_dir.rstrip('/')            
         if model_dir is None:
-            model_dir = '/media/hjalmar/VitaminD/head_tracker/model'
+            model_dir = '/home/hjalmar/head_tracker/model'
         self.model_dir = model_dir.rstrip('/')
         
-        self.N_class = 2
-        self.N_levels = 4
-        self.level_done = -1
+        self.batch_sz = 128
+        self.Nclass = 2
+        self.Nlevels = 4
         self.level = -1
         self.levels = []
         self.current = None
@@ -44,55 +43,56 @@ class TrainHeadTrackerMRP:
         self.labels = None
         win_shapes = [(48, 48),  (32, 32),  (32, 32),  (32, 32)]
                 
-        for k in range(self.N_levels):
+        for k in range(self.Nlevels):
             self.levels.append(levelClass(k,  win_shapes[k]))
             
     
-    def get_valid_data(self,  valid_fname):
+#    def get_valid_data(self,  valid_fname):
+#        
+#        images,  labels = self.get_inputs(valid_fname,  train=False)
+#        
+#        Nvalid = 30000
+#        batch_sz = 128
+#        valid_images,  valid_labels = [],  []
+#        Niter = int(np.ceil(Nvalid / batch_sz))
+#        
+#        with tf.Session() as sess:
+#            
+#            sess.run(tf.initialize_all_variables())
+#            coord = tf.train.Coordinator()
+#            threads = tf.train.start_queue_runners(sess=sess,  coord=coord)   
+#            
+#            try:               
+#                i = 0
+#                while i < Niter and not coord.should_stop():
+#                    imgs,  lbls = sess.run([images,  labels])            
+#                    valid_images.extend(imgs)
+#                    valid_labels.extend(lbls)
+#                    i += 1   
+#            except Exception as e: 
+#                coord.request_stop(e)
+#                    
+#            coord.request_stop()
+#            coord.join(threads, stop_grace_period_secs=10)
+#            
+#        return np.array(valid_images),  np.array(valid_labels)
         
-        images,  labels = self.get_inputs(valid_fname,  train=False)
-        
-        N_valid = 30000
-        batch_sz = 128
-        valid_images,  valid_labels = [],  []
-        N_iter = int(np.ceil(N_valid / batch_sz))
-        
-        with tf.Session() as sess:
             
-            sess.run(tf.initialize_all_variables())
-            coord = tf.train.Coordinator()
-            threads = tf.train.start_queue_runners(sess=sess,  coord=coord)   
-            
-            try:               
-                i = 0
-                while i < N_iter and not coord.should_stop():
-                    imgs,  lbls = sess.run([images,  labels])            
-                    valid_images.extend(imgs)
-                    valid_labels.extend(lbls)
-                    i += 1   
-            except Exception as e: 
-                coord.request_stop(e)
-                    
-            coord.request_stop()
-            coord.join(threads, stop_grace_period_secs=10)
-            
-        return np.array(valid_images),  np.array(valid_labels)
-        
-            
-    def get_inputs(self,  fname,  batch_sz=128,  train=False, flip=True):
+    def get_inputs(self, fname, N, train=False, flip=True):
         """
+        N  - Ntrain or Nvalid: number_of_examples_per_epoch
         """
         if not tf.gfile.Exists(fname):
             raise ValueError('Failed to find file: %s' % fname)
         
         if train:
-            N_epoch = self.current.N_epoch
+            Nepoch = self.current.Nepoch
         else:
-            N_epoch = 1
+            Nepoch = 1
             
         with tf.name_scope('input'):
             fname_queue = tf.train.string_input_producer(
-                [fname], num_epochs=N_epoch)
+                [fname], num_epochs=Nepoch)
 
             # Even when reading in multiple threads, share the filename
             # queue.
@@ -101,10 +101,8 @@ class TrainHeadTrackerMRP:
             if train:
                 # Distort image
                 image = self._distort_inputs(image,  flip=flip)
-                num_examples_per_epoch = 110000  # TODO: fixe proper num training examples
                 n_threads = 8
             else:
-                num_examples_per_epoch = 30000  # TODO: fix this too
                 n_threads = 4
                 
             # Shuffle the examples and collect them into batch_sz batches.
@@ -112,61 +110,63 @@ class TrainHeadTrackerMRP:
             # We run this in two threads to avoid being a bottleneck.
             # Ensures a minimum amount of shuffling of examples.
                 
-            min_queue_examples = int(num_examples_per_epoch * 0.4)
+            min_queue_examples = int(N * 0.4)
             
-            images, labels = tf.train.shuffle_batch( [image, label],
-                                                                           batch_size=batch_sz,
-                                                                           num_threads=n_threads,
-                                                                           capacity=min_queue_examples + 3 * batch_sz,
-                                                                           min_after_dequeue=min_queue_examples)
+            images, labels = tf.train.shuffle_batch([image, label],
+                                                    batch_size=self.batch_sz,
+                                                    num_threads=n_threads,
+                                                    capacity=min_queue_examples + 3 * self.batch_sz,
+                                                    min_after_dequeue=min_queue_examples)
                                                                       
             return images, labels            
 
 
-    def evaluate(self,  valid_fname,  fname_ckpt,  model_spec=None,  batch_sz=128):
-        
-        self.current.N_class = 2
-        
-          #self.session = tf.Session(graph=self.model.graph)
-        # Restore variables from disk.
-        # self.model.saver.restore(self.session, self.model.fname)
-        
-        with tf.Graph().as_default():
-
-            images,  labels = self.get_inputs(valid_fname,  train=False)
-            logits = inference(images,  self.current,  train=False, model_spec=model_spec) 
-            correct = tf.equal(tf.argmax(logits, 1), tf.cast(labels,  tf.int64))
-            accuracy = tf.reduce_mean(tf.cast(correct, tf.float32))
-            saver = tf.train.Saver()
-            #saver = tf.train.Saver(tf.all_variables())
-            with tf.Session() as sess:
-                sess.run(tf.initialize_all_variables())
-                saver.restore(sess, fname_ckpt)
-                
-                #import pdb
-                #pdb.set_trace()
-                
-                # Start the queue runners.
-                acc = 0.0
-                coord = tf.train.Coordinator()
-                threads = tf.train.start_queue_runners(sess=sess,  coord=coord)               
-                #print(sess.run(labels))
-                try:
-                    num_iter = int(np.ceil(30000 / 128))
-                    step = 0
-                    #print(sess.run([correct]))
-                    while step < num_iter and not coord.should_stop():
-                        
-                        a = sess.run(accuracy)
-                        print(a)
-                        acc += a
-                        step += 1
-                        
-                except Exception as e:  # pylint: disable=broad-except
-                    coord.request_stop(e)
-
-                coord.request_stop()
-                coord.join(threads, stop_grace_period_secs=10)
+#==============================================================================
+#     def evaluate(self,  valid_fname,  fname_ckpt,  model_spec=None,  batch_sz=128):
+#         
+#         self.current.Nclass = 2
+#         
+#           #self.session = tf.Session(graph=self.model.graph)
+#         # Restore variables from disk.
+#         # self.model.saver.restore(self.session, self.model.fname)
+#         
+#         with tf.Graph().as_default():
+# 
+#             images,  labels = self.get_inputs(valid_fname,  train=False)
+#             logits = inference(images,  self.current,  train=False, model_spec=model_spec) 
+#             correct = tf.equal(tf.argmax(logits, 1), tf.cast(labels,  tf.int64))
+#             accuracy = tf.reduce_mean(tf.cast(correct, tf.float32))
+#             saver = tf.train.Saver()
+#             #saver = tf.train.Saver(tf.all_variables())
+#             with tf.Session() as sess:
+#                 sess.run(tf.initialize_all_variables())
+#                 saver.restore(sess, fname_ckpt)
+#                 
+#                 #import pdb
+#                 #pdb.set_trace()
+#                 
+#                 # Start the queue runners.
+#                 acc = 0.0
+#                 coord = tf.train.Coordinator()
+#                 threads = tf.train.start_queue_runners(sess=sess,  coord=coord)               
+#                 #print(sess.run(labels))
+#                 try:
+#                     num_iter = int(np.ceil(30000 / 128))
+#                     step = 0
+#                     #print(sess.run([correct]))
+#                     while step < num_iter and not coord.should_stop():
+#                         
+#                         a = sess.run(accuracy)
+#                         print(a)
+#                         acc += a
+#                         step += 1
+#                         
+#                 except Exception as e:  # pylint: disable=broad-except
+#                     coord.request_stop(e)
+# 
+#                 coord.request_stop()
+#                 coord.join(threads, stop_grace_period_secs=10)
+#==============================================================================
 
         return 100 * (acc/step)
     
@@ -189,7 +189,7 @@ class TrainHeadTrackerMRP:
         # Convert label from a scalar uint8 tensor to an int32 scalar.
         label = tf.cast(features['label'], tf.int32)
         #        y = self.labels[idx, 0]       
-        #y = (np.arange(self.N_class) == y[:,None]).astype(np.float32)
+        #y = (np.arange(self.Nclass) == y[:,None]).astype(np.float32)
 
         return image, label
             
@@ -209,53 +209,24 @@ class TrainHeadTrackerMRP:
         
         return image
            
-        
-#    def train(self, level='all', acc_threshold=98, batch_sz=128,
-#              N_epoch=10, stop_threshold=True, verbose=True,  model_spec=None):
-#        """
-#        """
-#                            
-#        if level == 'all':
-#
-#            for level in range(self.N_levels):
-#                self.level = level
-#                self.current = self.levels[level]
-#                self.current.N_epoch = N_epoch
-#                self.current.batch_sz = batch_sz
-#                self.current.acc_threshold = acc_threshold 
-#                self.data = self.current.data.read()
-#                self.labels = self.current.labels.read() 
-#
-#                self._train(verbose=verbose, stop_threshold=stop_threshold)
-#        else:
-#            try:
-#                level = int(level)
-#                self.current = self.levels[level]
-#                if level != self.level:
-#                    self.data = self.current.data.read()
-#                    self.labels = self.current.labels.read()
-#            except:
-#                ValueError('Argument "level" must be either the string "all"'
-#                           'or 0 to 3 as int, string or float.')
-#            
-#            self.current.N_positive = (self.labels == 1).sum()
-#            self.current.N_negative = (self.labels == 0).sum()
-#            self.level = level
-#            self.current.N_epoch = N_epoch
-#            self.current.batch_sz = batch_sz
-#            self.current.acc_threshold = acc_threshold
-#            self.current.records['loss'] = []
-#            self.current.records['epoch_acc'] = []
-#            self.current.records['validation_acc'] = []
-#            self._train(verbose=verbose, stop_threshold=stop_threshold)
-
-
-    def train(self, level,  N_epoch,  model_spec=None):
+           
+    def train(self, level,  Nepoch,  model_spec=None):
         """
         """
-        model_fname = '/home/hjalmar/head_tracker/model/position_level%d' % level
-        train_fname = '/home/hjalmar/head_tracker/data/train_ht_level%d.tfrecords' % level
-        valid_fname = '/home/hjalmar/head_tracker/data/train_ht_level%d.tfrecords' % level
+        model_fname = '%s/position_level%d' % (self.model_dir,  level)
+        train_fname = '%s/train_position_level%d_N*.tfrecords' % (self.data_dir,  level)
+        valid_fname = '%s/dev_position_level%d_N*.tfrecords' % (self.data_dir,  level)
+        train_fname = glob(train_fname)
+        if not len(train_fname) == 1:
+            raise ValueError('Something wrong with the file name of the training data.')
+        else:
+            train_fname = train_fname[0]
+        valid_fname = glob(valid_fname)            
+        if not len(valid_fname) == 1:
+            raise ValueError('Something wrong with the file name of the validation data.')
+        else:
+            valid_fname = valid_fname[0]
+            
         self.current = self.levels[level]
         if level == 0:
             flip = False
@@ -264,18 +235,18 @@ class TrainHeadTrackerMRP:
         #threshold = self.current.acc_threshold
                
         #records = self.current.records
-        self.current.batch_sz = 128
-        self.current.N_epoch = N_epoch
+        self.current.batch_sz = self.batch_sz
+        self.current.Nepoch = Nepoch
         batch_sz = self.current.batch_sz
-        #N_test, N_valid = self.current.N_test, self.current.N_valid 
-        #
-        N_valid = 30000
-        self.current.N_train = 100000
-        self.current.N_batches_per_epoch = self.current.N_train // batch_sz
-        self.current.N_batches = self.current.N_batches_per_epoch * N_epoch
+        Nvalid = int(re.search(r'[\d]{5,6}', valid_fname).group())
+        self.current.Nvalid = Nvalid
+        Ntrain = int(re.search(r'[\d]{5,6}', train_fname).group())
+        self.current.Ntrain = Ntrain
+        self.current.Nbatch_per_epoch = self.current.Ntrain // batch_sz
+        #self.current.Nbatch = self.current.Nbatch_per_epoch * Nepoch
                 
         # Get graph/model
-        self.current.N_class = self.N_class
+        self.current.Nclass = self.Nclass
         #model = create_graph_position(self.current, model_spec=model_spec)
         learning_rate = 1e-4
                 
@@ -285,8 +256,8 @@ class TrainHeadTrackerMRP:
         
         with model.graph.as_default():
             # Input images and labels.
-            images, labels = self.get_inputs(train_fname,  batch_sz=batch_sz, train=True,  flip=flip)
-            valid_images, valid_labels = self.get_inputs(valid_fname,  train=False,  batch_sz=1000)        
+            images, labels = self.get_inputs(train_fname, Ntrain, train=True,  flip=flip)
+            valid_images, valid_labels = self.get_inputs(valid_fname,  Nvalid,  train=False,  batch_sz=1000)        
             saver = model.saver
 
             with tf.Session(graph=model.graph) as session:
@@ -310,7 +281,7 @@ class TrainHeadTrackerMRP:
                 try:
                     step, epoch_n  = 0,  0
                     epoch_loss,  epoch_acc = 0.0,  0.0
-                    while (epoch_n < N_epoch) and not coord.should_stop():
+                    while (epoch_n < Nepoch) and not coord.should_stop():
                         step += 1                        
                         # Train
                         X,  y = session.run([images,  labels])      
@@ -320,9 +291,9 @@ class TrainHeadTrackerMRP:
                         feed_dict[model.keep_prob] = 1.0
                         epoch_acc += model.accuracy.eval(feed_dict=feed_dict)
                         
-                        if (step % self.current.N_batches_per_epoch == 0):
+                        if (step % self.current.Nbatch_per_epoch == 0):
                             epoch_n += 1
-                            epoch_acc /= self.current.N_batches_per_epoch
+                            epoch_acc /= self.current.Nbatch_per_epoch
                             print('   %-5d|       %-12.3f|        %-14.2f'  %  (epoch_n, epoch_loss, epoch_acc*100))
 
                             if (epoch_n % 10 == 0):
@@ -331,7 +302,7 @@ class TrainHeadTrackerMRP:
                                     load_valid = True
                                 else:
                                     load_valid = False
-                                while i < N_valid // 1000:
+                                while i < Nvalid // 1000:
                                     if load_valid and not coord.should_stop():
                                         X,  y = session.run([valid_images,  valid_labels]) 
                                         valid_X.append(X)
@@ -350,7 +321,7 @@ class TrainHeadTrackerMRP:
                                             
                 finally:
                     v_acc,  i = 0.0,  0
-                    while i < N_valid // 1000:
+                    while i < Nvalid // 1000:
                         if load_valid and not coord.should_stop():
                             X,  y = session.run([valid_images,  valid_labels]) 
                             valid_X.append(X)
@@ -390,7 +361,7 @@ class TrainHeadTrackerMRP:
         axl.set_ylabel('Accuracy')
         axr.set_ylabel('Loss')
         axr.set_ylim([0, 300])
-        chance_acc = 100 * (self.current.N_negative / self.current.N_data)
+        chance_acc = 100 * (self.current.Nnegative / self.current.Ndata)
         axl.plot([0,  len(self.current.records['epoch_acc'])],  [chance_acc,  chance_acc],  '--r')
         axl.set_ylim([5*np.floor(chance_acc/5), 100])
         axl.grid()
@@ -401,7 +372,220 @@ class TrainHeadTrackerMRP:
             fig.savefig(fname)
             plt.close(fig)
             
+
+class TrainOrientationModel:
+    """
+    """
+    def __init__(self, Nclass=8,  data_dir=None,  model_dir=None):
+    
+        if data_dir is None:
+            data_dir = '/home/hjalmar/head_tracker/data'
+        self.data_dir = data_dir.rstrip('/')            
+        if model_dir is None:
+            model_dir = '/home/hjalmar/head_tracker/model'
+        self.model_dir = model_dir.rstrip('/')
+        
+        self.Nclass = Nclass
+        self.win_sz = 40
+        self.batch_sz = 256
+               
             
+    def get_inputs(self, fname, Nepoch, Nex_per_epoch, batch_sz, train=False):
+        """
+        Nex_per_epoch  - Ntrain or Nvalid: number_of_examples_per_epoch
+        """
+        if not tf.gfile.Exists(fname):
+            raise ValueError('Failed to find file: %s' % fname)
+                    
+        with tf.name_scope('input'):
+            fname_queue = tf.train.string_input_producer(
+                [fname], num_epochs=Nepoch)
+
+            # Even when reading in multiple threads, share the filename
+            # queue.
+            image, label = self._read_and_decode(fname_queue)
+
+            if train:
+                # Distort image
+                image = self._distort_inputs(image)
+                n_threads = 8
+            else:
+                n_threads = 4
+                
+            # Shuffle the examples and collect them into batch_sz batches.
+            # (Internally uses a RandomShuffleQueue.)
+            # We run this in two threads to avoid being a bottleneck.
+            # Ensures a minimum amount of shuffling of examples.             
+            min_queue_examples = int(Nex_per_epoch * 0.4)
+            
+            images, labels = tf.train.shuffle_batch([image, label],
+                                                    batch_size=self.batch_sz,
+                                                    num_threads=n_threads,
+                                                    capacity=min_queue_examples + 3 * self.batch_sz,
+                                                    min_after_dequeue=min_queue_examples)
+                                                                      
+            return images, labels            
+
+    
+    def _read_and_decode(self,  fname_queue):
+        reader = tf.TFRecordReader()
+        _,  serialized_example = reader.read(fname_queue)
+        features = tf.parse_single_example(
+            serialized_example, 
+            features={'image_raw': tf.FixedLenFeature([],  tf.string), 
+                              'label': tf.FixedLenFeature([],  tf.int64)
+                              })
+  
+        image = tf.decode_raw(features['image_raw'], tf.uint8)
+        image.set_shape([self.win_sz *  self.win_sz])
+        image = tf.reshape(image,  [self.win_sz,  self.win_sz,  1])
+      
+        # Convert from [0, 255] -> [-0.5, 0.5] floats.
+        image = tf.cast(image, tf.float32) * (1. / 255) - 0.5        
+        # Convert label from a scalar uint8 tensor to an int32 scalar.
+        label = tf.cast(features['label'], tf.int32)
+
+        return image, label
+            
+    
+    def _distort_inputs(self,  image):
+        """
+        Don't flip orientation images
+        """ 
+        # Because these operations are not commutative, consider randomizing
+        # the order their operation.
+        image = tf.image.random_brightness(image, max_delta=63)
+        image = tf.image.random_contrast(image, lower=0.2, upper=1.8)
+        # Subtract off the mean and divide by the variance of the pixels.
+        image = tf.image.per_image_whitening(image)
+        
+        return image
+           
+           
+    def train(self, Nepoch,  model_spec=None):
+        """
+        """
+        model_fname = '%s/orientation' % (self.model_dir)
+        train_fname = '%s/train_orientation_N*.tfrecords' % (self.data_dir)
+        valid_fname = '%s/dev_orientation_N*.tfrecords' % (self.data_dir)
+        train_fname = glob(train_fname)
+        if not len(train_fname) == 1:
+            raise ValueError('Something wrong with the file name of the training data.')
+        else:
+            train_fname = train_fname[0]
+        valid_fname = glob(valid_fname)
+        if not len(valid_fname) == 1:
+            raise ValueError('Something wrong with the file name of the validation data.')
+        else:
+            valid_fname = valid_fname[0]
+                           
+        batch_sz = 256 #128
+        Nvalid = int(re.search(r'[\d]{5,6}', valid_fname).group())
+        Ntrain = int(re.search(r'[\d]{5,6}', train_fname).group())
+        Nbatch_per_epoch = Ntrain // batch_sz
+        #Nbatch = Nbatch_per_epoch * Nepoch
+                
+        Nclass = self.Nclass
+        learning_rate = 1e-4
+                
+        valid_X,  valid_y = [],  []
+        
+        model = create_graph_orientation(self.win_sz,  Nclass,  model_spec=model_spec)        
+        
+        with model.graph.as_default():
+            # Input images and labels.
+            images, labels = self.get_inputs(train_fname,  Nepoch,  Ntrain,  batch_sz=batch_sz, train=True)
+            valid_images, valid_labels = self.get_inputs(valid_fname, 1,  Nvalid,  batch_sz=1000,  train=False)
+            saver = model.saver
+
+            with tf.Session(graph=model.graph) as session:
+                optimizer = tf.train.AdamOptimizer(learning_rate).minimize(model.loss) 
+                session.run(tf.initialize_all_variables())
+                # Start input enqueue threads
+                coord = tf.train.Coordinator()
+                threads = tf.train.start_queue_runners(sess=session,  coord=coord)  
+      
+                validation_accuracy = []
+                train_accuracy = []                
+                step, epoch_n  = 0,  0
+                epoch_loss,  epoch_acc = 0.0,  0.0
+                
+                try:
+
+                    while (epoch_n < Nepoch) and not coord.should_stop():
+                        step += 1                        
+                        # Train
+                        X,  angles = session.run([images,  labels])  
+                        y = angle2class(angles,  Nclass)   # angles are -180 to 180 needs to be range(Nclass)
+                        feed_dict = {model.X: X, model.y_: y, model.keep_prob: 0.5}
+                        optimizer.run(feed_dict)
+                        epoch_loss += model.loss.eval(feed_dict=feed_dict)
+                        feed_dict[model.keep_prob] = 1.0
+                        epoch_acc += model.accuracy.eval(feed_dict=feed_dict)
+                        
+                        if (step % Nbatch_per_epoch == 0):
+                            epoch_n += 1
+                            epoch_acc /= Nbatch_per_epoch
+                            print('   %-5d|       %-19.1f|        %-14.2f'  %  (epoch_n, epoch_loss, epoch_acc*100))
+
+                            if (epoch_n % 5 == 0):
+                                v_acc,  i = 0.0,  0
+                                if len(valid_y) < 1:
+                                    load_valid = True
+                                else:
+                                    load_valid = False
+                                while i < Nvalid // 1000:
+                                    if load_valid and not coord.should_stop():
+                                        X,  angles = session.run([valid_images,  valid_labels]) 
+                                        valid_X.append(X)
+                                        valid_y.append(angle2class(angles,  Nclass))  # Bin 360 degrees into Nclass bins with values 0:Nclass-1.
+                                    feed_dict = {model.X: valid_X[i], model.y_: valid_y[i], model.keep_prob: 1.0}
+                                    v_acc += model.accuracy.eval(feed_dict=feed_dict)
+                                    i += 1
+                                validation_accuracy.append(100 * (v_acc/i))
+                                train_accuracy.append(epoch_acc*100)                                
+                                saver.save(session,
+                                           '%s_Nclass%d_acc%1.1f.ckpt' % 
+                                           (model_fname, Nclass, validation_accuracy[-1]),
+                                           global_step=epoch_n)
+
+                            epoch_loss,  epoch_acc = 0.0,  0.0                          
+                        
+                except tf.errors.OutOfRangeError:
+                    print('Done training for %d epochs, %d steps.' % (epoch_n, step-1))       
+                                            
+                finally:
+                    v_acc,  i = 0.0,  0
+                    if len(valid_y) < 1:
+                        load_valid = True
+                    else:
+                        load_valid = False
+                    while i < Nvalid // 1000:
+                        if load_valid and not coord.should_stop():
+                            X,  y = session.run([valid_images,  valid_labels]) 
+                            valid_X.append(X)
+                            valid_y.append(np.int32(y / (360/Nclass)))  # Bin 360 degrees into Nclass bins with values 0:Nclass-1.
+                        feed_dict = {model.X: valid_X[i], model.y_: valid_y[i], model.keep_prob: 1.0}
+                        v_acc += model.accuracy.eval(feed_dict=feed_dict)
+                        i += 1
+                    validation_accuracy.append(100 * (v_acc/i))
+                    saver.save(session, '%s_Nclass%d_acc%1.1f.ckpt' % 
+                                        (model_fname, Nclass, validation_accuracy[-1]),
+                               global_step=epoch_n)
+                
+                    # Ask threads to stop
+                    coord.request_stop()
+
+                # Wait for threads to finish.
+                coord.join(threads)
+                session.close() 
+                
+                print('Training accuracy:',  train_accuracy)
+                print('Validation accuracy:',  validation_accuracy)
+                
+        return validation_accuracy[-1]
+                                        
+             
 def train_all(valid_thresh=99):
     
     data_fname = '/home/hjalmar/head_tracker/data/ht_data_overlap_mrp.hdf'
@@ -413,7 +597,7 @@ def train_all(valid_thresh=99):
     acc_thresholds = [99, 96, 94, 92]
     batch_sizes = [128, 128, 128, 128]
     
-    for level in range(1,  ht.N_levels):
+    for level in range(1,  ht.Nlevels):
         
         valid_thresh = acc_thresholds[level]
         batch_sz = batch_sizes[level]
@@ -421,14 +605,14 @@ def train_all(valid_thresh=99):
         valid_acc = 0    
         i = 0
         while valid_acc < valid_thresh:
-            N_epoch = 400
-            model_spec = {'k1': 5,  'k2': 5,  'd1': 32,  'd2':64 ,  'N_hidden':  128}   
+            Nepoch = 400
+            model_spec = {'k1': 5,  'k2': 5,  'd1': 32,  'd2':64 ,  'Nhidden':  128}   
             ht.train(level=level, acc_threshold=valid_thresh,
-                         N_epoch=N_epoch, stop_threshold=False,
+                         Nepoch=Nepoch, stop_threshold=False,
                          batch_sz=batch_sz,  model_spec=model_spec)
             if len(ht.current.records['validation_acc']) > 10:
                 print("model_spec = ", ht.levels[level].model_spec)
-                ht.plot('%s/training_record_level%d_Nepoch%d_d2%d_Nhidden%d_n%d.png' % (fig_dir, level,  N_epoch,  model_spec['d2'],  model_spec['N_hidden'],  i))
+                ht.plot('%s/training_record_level%d_Nepoch%d_d2%d_Nhidden%d_n%d.png' % (fig_dir, level,  Nepoch,  model_spec['d2'],  model_spec['Nhidden'],  i))
                 valid_acc = ht.current.records['validation_acc'][-1]
                 i += 1
             else:
@@ -440,73 +624,76 @@ def find_good():
     ht = TrainHeadTrackerMRP()
     #acc = 0.0
     #while acc < 97:
-#        acc = ht.train(level=0,  N_epoch=60)
+#        acc = ht.train(level=0,  Nepoch=60)
 
 #    acc = 0.0
   #  while acc < 99:
-     #   acc = ht.train(level=1,  N_epoch=60)        
+     #   acc = ht.train(level=1,  Nepoch=60)        
+        
+#    acc = 0.0
+ #   while acc < 99:
+  #      acc = ht.train(level=2,  Nepoch=100)        
         
     acc = 0.0
     while acc < 99:
-        acc = ht.train(level=2,  N_epoch=100)        
-        
-    acc = 0.0
-    while acc < 99:
-        acc = ht.train(level=3,  N_epoch=100) 
+        acc = ht.train(level=3,  Nepoch=100) 
 
+#==============================================================================
+# 
+# def search_models(level):
+#     """
+#     """   
+#     nrep=5
+#     data_fname = '/home/hjalmar/head_tracker/data/ht_data_overlap_mrp.hdf'
+#     fig_dir = '/home/hjalmar/head_tracker/figs/modelsearch'
+#     ht = TrainHeadTrackerMRP(data_fname=data_fname) 
+#     
+#     #all_params = {'k1': [7],  'k2': [7],  'd1': [ 16,  64],  'd2':[16,  64] ,  'Nhidden': [32, 64, 128]}
+#     all_params = {'d1': [ 16,  64],  'd2':[16,  64] ,  'Nhidden': [32, 64, 128,  256]}
+#       
+#     records = {}
+#     for param in all_params.keys():
+#         s = 'np.recarray(nrep,  dtype=['
+#         for value in all_params[param]:
+#             s += '( "' + str(value) + '", float), '
+#         s = s.rstrip(', ')
+#         s += '])'
+#         records[param] = eval(s)
+# 
+#     ht = TrainHeadTrackerMRP(data_fname=data_fname) 
+#     for param in all_params.keys():
+#         for value in all_params[param]:
+#                 for i in range(nrep):
+#                     model_spec = {'k1': 5,  'k2': 5,  'd1': 32,  'd2':32 ,  'Nhidden':  64}
+#                     model_spec[param] = value
+#                     ht.train(level=level,  Nepoch=100, stop_threshold=False, model_spec=model_spec)
+#                     fname = ('%s/msearch_level%d_k1%d_k2%d_d1%d_d2%d_Nhidden%d_rep%d' % (fig_dir, level, model_spec['k1'], model_spec['k2'],  model_spec['d1'], model_spec['d2'], model_spec['Nhidden'],  i))
+#                     ht.plot(fname + '.png')
+#                     f_conf = open('%s.conf' % fname, 'w')
+#                     f_conf.write(ht.current.tostring())
+#                     f_conf.close()
+#                     records[param][str(value)][i] = ht.current.records['validation_acc'][-1]
+# 
+#     ht.close()
+#     return records
+# 
+# 
+# def some_extra(level):
+#     
+#     nrep = 5
+#     data_fname = '/home/hjalmar/head_tracker/data/ht_data_overlap_mrp.hdf'
+#     fig_dir = '/home/hjalmar/head_tracker/figs/modelsearch'
+#     ht = TrainHeadTrackerMRP(data_fname=data_fname) 
+#     for i in range(nrep):
+#         model_spec = {'k1': 5,  'k2': 5,  'd1': 32,  'd2':32 ,  'Nhidden':  256}
+#         ht.train(level=level,  Nepoch=100, stop_threshold=False, model_spec=model_spec)
+#         fname = ('%s/msearch_level%d_k1%d_k2%d_d1%d_d2%d_Nhidden%d_rep%d' % (fig_dir, level, model_spec['k1'], model_spec['k2'],  model_spec['d1'], model_spec['d2'], model_spec['Nhidden'],  i))
+#         ht.plot(fname + '.png')
+#         f_conf = open('%s.conf' % fname, 'w')
+#        f_conf.write(ht.current.tostring())
+#        f_conf.close()    
+#==============================================================================
 
-def search_models(level):
-    """
-    """   
-    nrep=5
-    data_fname = '/home/hjalmar/head_tracker/data/ht_data_overlap_mrp.hdf'
-    fig_dir = '/home/hjalmar/head_tracker/figs/modelsearch'
-    ht = TrainHeadTrackerMRP(data_fname=data_fname) 
-    
-    #all_params = {'k1': [7],  'k2': [7],  'd1': [ 16,  64],  'd2':[16,  64] ,  'Nhidden': [32, 64, 128]}
-    all_params = {'d1': [ 16,  64],  'd2':[16,  64] ,  'Nhidden': [32, 64, 128,  256]}
-      
-    records = {}
-    for param in all_params.keys():
-        s = 'np.recarray(nrep,  dtype=['
-        for value in all_params[param]:
-            s += '( "' + str(value) + '", float), '
-        s = s.rstrip(', ')
-        s += '])'
-        records[param] = eval(s)
-
-    ht = TrainHeadTrackerMRP(data_fname=data_fname) 
-    for param in all_params.keys():
-        for value in all_params[param]:
-                for i in range(nrep):
-                    model_spec = {'k1': 5,  'k2': 5,  'd1': 32,  'd2':32 ,  'Nhidden':  64}
-                    model_spec[param] = value
-                    ht.train(level=level,  Nepoch=100, stop_threshold=False, model_spec=model_spec)
-                    fname = ('%s/msearch_level%d_k1%d_k2%d_d1%d_d2%d_Nhidden%d_rep%d' % (fig_dir, level, model_spec['k1'], model_spec['k2'],  model_spec['d1'], model_spec['d2'], model_spec['Nhidden'],  i))
-                    ht.plot(fname + '.png')
-                    f_conf = open('%s.conf' % fname, 'w')
-                    f_conf.write(ht.current.tostring())
-                    f_conf.close()
-                    records[param][str(value)][i] = ht.current.records['validation_acc'][-1]
-
-    ht.close()
-    return records
-
-
-def some_extra(level):
-    
-    nrep = 5
-    data_fname = '/home/hjalmar/head_tracker/data/ht_data_overlap_mrp.hdf'
-    fig_dir = '/home/hjalmar/head_tracker/figs/modelsearch'
-    ht = TrainHeadTrackerMRP(data_fname=data_fname) 
-    for i in range(nrep):
-        model_spec = {'k1': 5,  'k2': 5,  'd1': 32,  'd2':32 ,  'Nhidden':  256}
-        ht.train(level=level,  Nepoch=100, stop_threshold=False, model_spec=model_spec)
-        fname = ('%s/msearch_level%d_k1%d_k2%d_d1%d_d2%d_Nhidden%d_rep%d' % (fig_dir, level, model_spec['k1'], model_spec['k2'],  model_spec['d1'], model_spec['d2'], model_spec['Nhidden'],  i))
-        ht.plot(fname + '.png')
-        f_conf = open('%s.conf' % fname, 'w')
-        f_conf.write(ht.current.tostring())
-        f_conf.close()    
 
 
 class levelClass:
@@ -603,6 +790,13 @@ def max_pool_2x2(x):
     return tf.nn.max_pool(x, ksize=[1, 2, 2, 1], 
                                          strides=[1, 2, 2, 1], padding='SAME')    
 
+                                         
+def max_pool_3x2(x):
+    """
+    """     
+    return tf.nn.max_pool(x, ksize=[1, 3, 3, 1], 
+                                         strides=[1, 2, 2, 1], padding='SAME')                                             
+
 
 def create_graph_position(levelObj,  model_spec=None):
     """
@@ -633,7 +827,7 @@ def create_graph_position(levelObj,  model_spec=None):
     
     win_nr,  win_nc = levelObj.win_nr,  levelObj.win_nc
     Nclass = 2
-    #Nbatches = levelObj.Nbatches
+    #Nbatch = levelObj.Nbatch
        
     class Model:
         
@@ -649,9 +843,7 @@ def create_graph_position(levelObj,  model_spec=None):
                 # 2 convolutional layers
                 # 1 fully connected
                 # read out layer
-                
-                # TODO: best num filters, patch_sz (k), dropout on all layers or just last?
-                
+                                
                 # layer 1 -- convolutional
                 w1 = weight_variable((k1, k1, 1, d1))  # k1 -- spatial filter size of layer 1;  d1 -- num filters of layer 1.
                 b1 = bias_variable([d1])
@@ -785,9 +977,88 @@ def training(loss, learning_rate):
     return train_op
        
     
-def create_graph_rotation():
+def create_graph_orientation(win_sz,  Nclass,  model_spec=None):
     """
     """
+    
+    if model_spec is None:
+            k1,  k2 = 5,  5
+            d1,  d2= 64, 64
+            Nhidden1=384
+            Nhidden2=192
+    else:
+        k1,  k2 = model_spec['k1'],  model_spec['k2']
+        d1,  d2= model_spec['d1'],  model_spec['d2']
+        Nhidden = model_spec['Nhidden']
+                   
+    class Model:
+        
+        def __init__(self):
+            self.graph = tf.Graph()
+            # Define ops and tensors in `g`.
+            with self.graph.as_default():
+                # Input data.
+                self.X = tf.placeholder(tf.float32, shape=(None, win_sz, win_sz, 1))
+                self.y_ = tf.placeholder(tf.float32, shape=(None))
+                                
+                # layer 1 -- convolutional
+                w1 = weight_variable((k1, k1, 1, d1))  # k1 -- spatial filter size of layer 1;  d1 -- num filters of layer 1.
+                b1 = bias_variable([d1])
+                # Connect
+                h_conv1 = tf.nn.relu(conv2d(self.X, w1) + b1)
+                h_pool1 = max_pool_3x2(h_conv1)    
+                
+                # norm1
+                h_norm1 = tf.nn.lrn(h_pool1, 4, bias=1.0, alpha=0.001 / 9.0, 
+                                                 beta=0.75, name='norm1')                
+
+                # layer 2 -- convolutional
+                w2 = weight_variable((k2, k2, d1, d2))
+                b2 = bias_variable([d2])
+                h_conv2 = tf.nn.relu(conv2d(h_norm1, w2) + b2)
+                
+                # norm2
+                h_norm2 = tf.nn.lrn(h_conv2, 4, bias=1.0, alpha=0.001 / 9.0, 
+                                                 beta=0.75, name='norm2')                
+                h_pool2 = max_pool_3x2(h_norm2)                
+
+                # layer 3 -- fully connected with dropout
+                self.keep_prob = tf.placeholder(tf.float32)
+                h_pool2_shape = h_pool2.get_shape().as_list()
+                flat_shape = np.prod(h_pool2_shape[1:])
+                w3 = weight_variable((flat_shape , Nhidden1))
+                b3 = bias_variable([Nhidden1]) 
+                flat_shape = [-1, flat_shape]
+                h_pool2_flat_drop = tf.nn.dropout(tf.reshape(h_pool2, flat_shape), self.keep_prob)
+                h_fc1_drop = tf.nn.relu(tf.matmul(h_pool2_flat_drop, w3) + b3)
+                # layer 4 -- fully connected with dropout
+                w4 = weight_variable((Nhidden1 , Nhidden2))
+                b4 = bias_variable([Nhidden2]) 
+                h_fc2_drop = tf.nn.relu(tf.matmul(tf.nn.dropout(h_fc1_drop, self.keep_prob),  w4) + b4)
+                # layer 5 -- readout layer with dropout
+                h_fc3_drop = tf.nn.dropout(h_fc2_drop, self.keep_prob)
+                w5 = weight_variable((Nhidden2,  Nclass))
+                b5 = bias_variable([Nclass]) 
+
+                self.logits = tf.matmul(h_fc3_drop, w5) + b5   # Do softmax op when computing loss, supposedly better num stability.
+                
+                # Loss
+                cross_entropy =tf.nn.sparse_softmax_cross_entropy_with_logits(
+                    self.logits, tf.to_int64(self.y_), name='xentropy')
+                self.loss = tf.reduce_mean(cross_entropy, name='xentropy_mean')
+                #self.loss = tf.reduce_mean(tf.nn.softmax_cross_entropy_with_logits(self.logits, self.y_))
+                #self.optimizer = tf.train.AdamOptimizer(1e-4).minimize(self.loss)        
+                # SOFTMAX -- CRASH
+                #self.y = tf.nn.softmax(self.logits)
+                correct = tf.equal(tf.argmax(self.logits, 1), tf.cast(self.y_,  tf.int64))
+                self.accuracy = tf.reduce_mean(tf.cast(correct, tf.float32))
+                #correct_prediction = tf.equal(tf.argmax(self.logits, 1), tf.argmax(self.y_, 1))
+                #self.accuracy = tf.reduce_mean(tf.cast(correct_prediction, tf.float32))
+                #acc = np.sum(np.argmax(predictions, 1) == np.argmax(labels, 1))
+                #(acc * 100) / predictions.shape[0]
+                self.saver = tf.train.Saver()
+                
+    return Model()    
     
     
 def softmax(logits):
@@ -941,7 +1212,7 @@ def plot_msearch(records,  fig_fname=None):
         fig.savefig(fig_fname)
         plt.close(fig)
     
-class HeadTrackerMRP:
+class HeadTracker:
     """
     """
     def __init__(self, model_dir=None):
@@ -955,7 +1226,8 @@ class HeadTrackerMRP:
         self.mrp = MultiResolutionPyramid()
         #self.positon = np.recarray(self.mrp.Nlevels,  [('x',  float),  ('y',  float)])
         
-    def track2video(self,  in_fname,  out_fname,  positions):
+        
+    def track2video(self,  in_fname,  out_fname,  track):
         """
         """
         if not tf.gfile.Exists(in_fname):
@@ -973,11 +1245,15 @@ class HeadTrackerMRP:
         fig = plt.figure(figsize=figsize, dpi=dpi)  # TODO dpi depends on the monitor used, remove this dependence
                                                                          # see: http://stackoverflow.com/questions/13714454/specifying-and-saving-a-figure-with-exact-size-in-pixels 
         with writer.saving(fig, out_fname, dpi):
-            for pos in positions:
-                fst.read_t(pos.t)
+            for trk in track:
+                fst.read_t(trk.t)
+                
                 ax = fig.add_subplot(111)
                 ax.imshow(fst.frame,  origin='lower')
-                ax.plot( pos.x,  pos.y,  'xr',  ms=20,  mew=2)
+                x,  y = trk.x,  trk.y
+                ax.plot(x,  y,  'xr',  ms=20,  mew=2)
+                gzl_x, gzl_y = get_gaze_line(trk.angle, x, y, 50, units='deg')
+                ax.plot(gzl_x,  gzl_y,  '-g',  lw=2)
                 ax.set_xlim([0,  fst.frame.shape[1]])
                 ax.set_ylim([0,  fst.frame.shape[0]]) 
                 ax.set_xticks([])
@@ -987,6 +1263,7 @@ class HeadTrackerMRP:
                 fig.clf()
 
         fst.close()
+                
                 
     def track_head(self,  video_fname,  t_start=0.0,  t_end=-1,  dur=None,  Nlevel=3):
         """
@@ -1036,15 +1313,23 @@ class HeadTrackerMRP:
     def test_track_head(self,  log_fname,  video_dir,  Nlevel=2,  Nframe=300):
         """
         """
+        verbose=False
+        Nclass = 12
         scale_factor = 32/200   # TODO
         log_data, log_header = read_log_data(log_fname)
         video_fname = '%s/%s' % (video_dir.rstrip('/'), log_header['video_fname'])
         video_fname = glob(video_fname)[0]
         fst = FrameStepper(video_fname)
         
-        est_pos = np.recarray(shape=Nframe,  dtype=[('x',  float), ('y',  float)])
-        true_pos = np.recarray(shape=Nframe,  dtype=[('x',  float), ('y',  float)])
-        
+        est_track = np.recarray(shape=Nframe,  dtype=[('t',  float), 
+                                                                                       ('x',  float),
+                                                                                       ('y',  float), 
+                                                                                       ('angle',  float)])
+        true_track = np.recarray(shape=Nframe,  dtype=[('t',  float),
+                                                                                         ('x',  float),
+                                                                                         ('y',  float), 
+                                                                                         ('angle',  float)])
+                  
         if Nframe >= len(log_data):
             raise ValueError('Nframes cannot be greater than the number of frames in the log file.')
         
@@ -1054,19 +1339,39 @@ class HeadTrackerMRP:
             # Read the frame
             fst.read_t(dat['frame_time'])
             frame = imresize(fst.frame.mean(axis=2), scale_factor)
+            
+            # Time of frame
+            true_track.t[i] = fst.t
+            est_track.t[i] = fst.t
+            
             # True head position
-            true_pos.x[i] = dat['center_x']
-            true_pos.y[i] = dat['center_y']
+            true_track.x[i] = dat['center_x']
+            true_track.y[i] = dat['center_y']
             
-            x,  y = self.predict_position(frame,  Nlevel,  verbose=True)
-            est_pos.x[i] = x / scale_factor
-            est_pos.y[i] = y / scale_factor
+            # Estimated head position
+            x,  y = self.predict_position(frame,  Nlevel,  verbose=verbose)
+            est_track.x[i] = x / scale_factor
+            est_track.y[i] = y / scale_factor
             
-        error = np.sqrt((true_pos.x - est_pos.x)**2 + (true_pos.x - est_pos.y))
+            # True head orientation
+            true_track.angle[i] = dat['angle']
+            
+            # Estimated head orientation
+            pos = {'x': x,  'y': y}
+            angle,  w_angle = self.predict_orientation(frame, pos,  Nclass, verbose=verbose)
+            est_track.angle[i] = w_angle
+        
+        error = np.recarray(shape=Nframe,  dtype=[('position',  float),
+                                                                                 ('orientation',  float)])
+
+        e = (true_track.x - est_track.x)**2 + (true_track.x - est_track.y)**2
+        error['position'] = np.sqrt(e)
+        z = (angles2complex(true_track.angle) - angles2complex(est_track.angle))**2
+        error['orientation'] = np.abs(complex2angles(np.sqrt(z)))
         
         fst.close()
 
-        return est_pos,  true_pos,  error
+        return est_track,  true_track,  error
             
             
     def predict_position(self, frame,  Nlevel,  verbose=True):
@@ -1115,10 +1420,34 @@ class HeadTrackerMRP:
         return w_pos.x,  w_pos.y
             
         
-    def predict_rotation(self, X, model_fname):
+    def predict_orientation(self, frame, pos,  Nclass, verbose=True):
         """
-        X     - shape = (n_samples, 32, 32)
         """
+        Nave = 10
+        win_sz = 40
+
+        self.frame = frame        
+        self.restore_orientation_model(win_sz,  Nclass,  verbose=verbose)
+        model = self.model_orientation
+            
+        offsets = np.zeros((Nave, 2))
+        offsets[1:, :] = np.random.randint(-10, 10, (Nave-1, 2))
+        offsets += [pos['y'],  pos['x']]
+        wins = []
+        for i,  offset in enumerate(offsets):
+            if (offset[0] > 0) and (offset[0] < frame.shape[0]) and (offset[1] > 0) and (offset[1] < frame.shape[1]):
+                wins.append(get_window(frame,  win_sz,  offset).reshape((win_sz,  win_sz,  1)))
+        feed_dict={model.X: np.array(wins), model.keep_prob: 1.0}
+        #import pdb
+        #pdb.set_trace()
+        predictions = softmax(model.logits.eval(session=model.session,  feed_dict=feed_dict))
+        y = np.argmax(predictions,  axis=1)
+        angles = class2angle(y,  Nclass)
+        w = predictions.max(axis=1)/predictions.max(axis=1).sum()
+        w_z = (angles2complex(angles) * w).sum()
+        w_angle = complex2angles(w_z)
+
+        return angles[0],  w_angle        
         
         
     def restore_position_model(self,  level,  verbose=True):
@@ -1154,6 +1483,31 @@ class HeadTrackerMRP:
                        
         if verbose:
             print(msg)
+    
+    
+    def restore_orientation_model(self,  win_sz,  Nclass,  verbose=True):
+        """
+        """
+                
+        if hasattr(self,  'model_orientation'):
+            msg = ('Model %s already restored.' %
+                         self.model_orientation.fname.split('/')[-1])
+        else:
+            
+            model = create_graph_orientation(win_sz,  Nclass)
+            model_fn = '%s/orientation_Nclass%d_acc*.ckpt*' % (self.model_dir,  Nclass)
+            model_fn = glob(model_fn)
+            model_fn.sort()
+            model.fname = model_fn[-1].rstrip('.meta')
+
+            model.session = tf.Session(graph=model.graph)
+            # Restore variables from disk.
+            model.saver.restore(model.session, model.fname)
+            self.model_orientation = model
+            msg = ('Model %s restored.' %  model.fname.split('/')[-1])
+                       
+        if verbose:
+            print(msg)    
     
     
     def plot(self,  true_pos = None,  fname=None):

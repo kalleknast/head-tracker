@@ -7,7 +7,7 @@ Created on Wed Feb  3 14:33:25 2016
 
 
 from ht_helper import get_input, FrameStepper,  closest_coordinate
-from ht_helper import MultiResolutionPyramid, dist2coordinates
+from ht_helper import MultiResolutionPyramid, dist2coordinates,  angle2class
 from ht_helper import get_window
 import matplotlib.pyplot as plt
 from datetime import datetime
@@ -18,6 +18,7 @@ import numpy as np
 import warnings
 import sys
 import tensorflow as tf
+import re
 
 warnings.simplefilter("ignore")
 
@@ -597,8 +598,8 @@ def labeledData2storage_mrp(log_dir,
                     rot_im -= rot_im.min()
                     rot_im /= rot_im.max()
                     rot_im *= 255   
-                    rotation_images.append(rot_im)
-                    rotations.append(log_data['angle'])
+                    rotation_images.append(rot_im.reshape((40,  40,  1)))
+                    rotations.append(dat['angle'])
 
             # Head position
             for im_i, image in enumerate(mrp.levels[0].wins):
@@ -667,9 +668,9 @@ def labeledData2storage_mrp(log_dir,
         convert_to(train_images, train_labels, train_fname)
         
         print('\nSaved data for level %d\n%s' % (k,  '-'*20))
-        print(' Total num: %d',  Ntot)
-        print(' Num train: %d',  Ntrain)
-        print(' Num dev: %d',  Ndev)
+        print(' Total num:',  Ntot)
+        print(' Num train:',  Ntrain)
+        print(' Num dev:',  Ndev)
         
     print('\nSaving rotation data to tfrecords...')
     images = np.array(rotation_images)
@@ -684,7 +685,7 @@ def labeledData2storage_mrp(log_dir,
     dev_labels = np.empty([dev_idx.shape[0],  1]) 
     for i,  idx in enumerate(dev_idx):        
         dev_images[i] = images[idx,  :,  :,  :]
-        dev_labels[i] = labels[idx]            
+        dev_labels[i] = labels[idx] 
     dev_fname = '%s/dev_rotation_N%d.tfrecords' % (out_dir.rstrip('/'),  Ndev)
     convert_to(dev_images, dev_labels, dev_fname)
 
@@ -692,64 +693,147 @@ def labeledData2storage_mrp(log_dir,
     train_labels = np.empty([train_idx.shape[0],  1]) 
     for i,  idx in enumerate(train_idx):        
         train_images[i] = images[idx,  :,  :,  :]
-        train_labels[i] = labels[idx,]   
+        train_labels[i] = labels[idx]   
     train_fname = '%s/train_rotation_N%d.tfrecords' % (out_dir.rstrip('/'),  Ntrain)
     convert_to(train_images, train_labels, train_fname)
         
     print('\nSaved rotation data\n%s' % ('-'*20))
-    print(' Total num: %d',  Ntot)
-    print(' Num train: %d',  Ntrain)
-    print(' Num dev: %d',  Ndev)        
+    print(' Total num:',  Ntot)
+    print(' Num train:',  Ntrain)
+    print(' Num dev:',  Ndev)        
             
 
-def inspect_data(fname,  _N = 1000):
+def inspect_rotation_data(fname,  N = 1000,  win_sz=40):
     """
     Visually check the data.
     """
+    
+    def inputs(fname,  N,  win_sz):
+        batch_sz = 1000
+        if not tf.gfile.Exists(fname):
+            raise ValueError('Failed to find file: %s' % fname)
+                    
+        with tf.name_scope('input'):
+            fname_queue = tf.train.string_input_producer(
+                [fname], num_epochs=1)
 
-    tf.python_io.tf_record_iterator(fname)
+            # Even when reading in multiple threads, share the filename
+            # queue.
+            image, label = _read_and_decode(fname_queue,  win_sz)
 
-    plt.ion()
-    fig = plt.figure(figsize=[23.1875,   9.55])
-    ax0 = fig.add_axes([0.005, 0.01, 0.49, 0.97])
-    ax1 = fig.add_axes([0.501, 0.01, 0.49, 0.97])
+            min_queue_examples = int(N * 0.4)
+            
+            images, labels = tf.train.shuffle_batch( [image, label],
+                                                                           batch_size=batch_sz,
+                                                                           num_threads=4,
+                                                                           capacity=min_queue_examples + 3 * batch_sz,
+                                                                           min_after_dequeue=min_queue_examples)
+                                                                      
+            return images, labels            
 
 
-    def tile_images(A3d, shape):
-        # TODO: do it w reshape instead of loops.
-        h, w, n = A3d.shape
-        im = np.empty(shape, dtype=A3d.dtype)
-        nr = shape[0]//h
-        nc = shape[1]//w
-        i = 0
-        XY = []
-        for r in range(nr):
-            if i < n:
-                for c in range(nc):
-                    if i < n:
-                        im[r * h: r * h + h, c * w: c * w + h] = A3d[:, :, i]
-                        XY.append((c * w, r * h))
-                        i += 1
-                    else:
-                        break
-            else:
-                break
-        return im, XY
+    def _read_and_decode(fname_queue,  win_sz):
+        reader = tf.TFRecordReader()
+        _,  serialized_example = reader.read(fname_queue)
+        features = tf.parse_single_example(
+            serialized_example, 
+            features={'image_raw': tf.FixedLenFeature([],  tf.string), 
+                              'label': tf.FixedLenFeature([],  tf.int64)
+                              })
 
-    heads, XY = tile_images(heads, (480, 640))
-    no_heads, _ = tile_images(no_heads, (480, 640))
+        image = tf.decode_raw(features['image_raw'], tf.uint8)
+        image.set_shape([win_sz *  win_sz])
+        image = tf.reshape(image,  [win_sz,  win_sz,  1])
+      
+        # Convert from [0, 255] -> [-0.5, 0.5] floats.
+        image = tf.cast(image, tf.float32) * (1. / 255) - 0.5        
+        # Convert label from a scalar uint8 tensor to an int32 scalar.
+        label = tf.cast(features['label'], tf.int32)
+        return image, label
+    
+    Nclass = 8
+    N = int(re.search(r'[\d]{5,6}', fname).group())
+    images,  labels = inputs(fname,  N,  win_sz=win_sz)
+    with tf.Session() as session:
+        session.run(tf.initialize_all_variables())
+        coord = tf.train.Coordinator()
+        threads = tf.train.start_queue_runners(sess=session,  coord=coord)  
+        try:
+            X,  angles = session.run([images,  labels]) 
+            y = angle2class(angles,  Nclass)
+        except:
+            pass
 
-    f.close()
+        coord.request_stop()
+        coord.join(threads)
+        
+    fig = plt.figure(figsize=[ 23.1875,  12.775 ])  # full screen
+    h = 1/10
+    w = 1/16
+    i = 0
+    c_counts = np.zeros((Nclass,  2),  dtype=int)
+    
+    while (c_counts.sum(axis=1) < 10*2).any():
+        label = y[i]
 
-    ax0.imshow(heads, origin='lower', cmap=plt.cm.gray)
-    for i, xy in enumerate(XY):
-        ax0.text(xy[0], xy[1], i+n, va='bottom', ha='left', fontsize=7)
-    ax0.set_xticks([])
-    ax0.set_yticks([])
-
-    ax1.imshow(no_heads, origin='lower', cmap=plt.cm.gray)
-    ax1.set_xticks([])
-    ax1.set_yticks([])
+        if c_counts[label,  0] < 10:
+            c_counts[label,  0] += 1
+            r = c_counts[label,  0]-1
+            c = label*2
+            #print(label,  r,  c)
+            ax = fig.add_axes([w*c, h*r, w, h], xticks=[], yticks=[])
+            ax.imshow(X[i].reshape((win_sz,win_sz)),  origin='lower',  cmap=plt.cm.gray)
+            ax.text(20, 20,  str(label))
+        elif c_counts[label,  1] < 10:
+            c_counts[label,  1] += 1
+            r = c_counts[label,  1]-1
+            c = label*2+1
+            #print(label,  r,  c)
+            ax = fig.add_axes([w*c, h*r, w, h], xticks=[], yticks=[])
+            ax.imshow(X[i].reshape((win_sz,win_sz)),  origin='lower',  cmap=plt.cm.gray)
+            ax.text(20, 20,  str(label))            
+        else:
+            pass
+            
+        i += 1
+            
+    plt.show()
+    
+#    def tile_images(A3d, shape):
+#        # TODO: do it w reshape instead of loops.
+#        h, w, n = A3d.shape
+#        im = np.empty(shape, dtype=A3d.dtype)
+#        nr = shape[0]//h
+#        nc = shape[1]//w
+#        i = 0
+#        XY = []
+#        for r in range(nr):
+#            if i < n:
+#                for c in range(nc):
+#                    if i < n:
+#                        im[r * h: r * h + h, c * w: c * w + h] = A3d[:, :, i]
+#                        XY.append((c * w, r * h))
+#                        i += 1
+#                    else:
+#                        break
+#            else:
+#                break
+#        return im, XY
+#
+#    heads, XY = tile_images(heads, (480, 640))
+#    no_heads, _ = tile_images(no_heads, (480, 640))
+#
+#    f.close()
+#
+#    ax0.imshow(heads, origin='lower', cmap=plt.cm.gray)
+#    for i, xy in enumerate(XY):
+#        ax0.text(xy[0], xy[1], i+n, va='bottom', ha='left', fontsize=7)
+#    ax0.set_xticks([])
+#    ax0.set_yticks([])
+#
+#    ax1.imshow(no_heads, origin='lower', cmap=plt.cm.gray)
+#    ax1.set_xticks([])
+#    ax1.set_yticks([])
     
     plt.draw()
     plt.ioff()

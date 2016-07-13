@@ -516,6 +516,75 @@ def closest_coordinate(r, c, coordinates):
     return c, i
 
     
+def get_gaze_line(angle, x, y, r, units='rad'):
+    """
+    Parameters
+    ----------
+    angle
+    x
+    y
+    r
+    units : Units of "angle", "rad" for radians or "deg" for degrees.
+    
+    Returns
+    -------
+    gzl_x
+    gzl_y
+    """  
+    if units == 'rad':
+        gzl_x = [x, x + r * np.cos(angle)]
+        gzl_y = [y, y + r * np.sin(angle)]
+    elif units == 'deg':
+        gzl_x = [x, x + r * np.cos(np.deg2rad(angle))]
+        gzl_y = [y, y + r * np.sin(np.deg2rad(angle))]
+    else:
+        print('"units" has to be "rad" or "deg"')
+        return 0
+    
+    return gzl_x, gzl_y    
+
+    
+def angles2complex(angles):   
+    """ 
+    Angles in degrees, array or scalar
+    """ 
+    z = np.cos(np.deg2rad(angles)) + np.sin(np.deg2rad(angles))*1j
+    return z
+    
+
+def complex2angles(z):   
+    """ 
+    z complex array or scalar 
+    angles in degrees, array or scalar
+    """ 
+    angles = np.rad2deg(np.arctan2(z.imag, z.real))
+    return angles
+    
+    
+def angle2class(angles,  Nclass):
+    """
+    Angles are from -180 to 180
+    y run from 0 to Nclass-1
+    """
+    angles += 180  # angles are -180:180 -> shift to 0:360
+    y = np.int32(angles / (360 / Nclass))    # Bin 360 degrees into Nclass bins with values 0:Nclass-1.
+    if np.isscalar(y):
+       if y == Nclass:
+          y = 0.0
+    else:
+        y[y == Nclass] = 0  # 0 & 360 are same angle
+    return np.float32(y)
+    
+    
+def class2angle(y,  Nclass):
+    """
+    Angles are from -180 to 180
+    y run from 0 to Nclass-1
+    """
+    angles = y * (360 / Nclass) - 180 # angles run from -180:180
+    return angles
+
+    
 def dist2coordinates(r, c, coordinates):
     """
     Returns the coordinate with minimum distance to r & c,
