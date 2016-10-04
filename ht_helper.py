@@ -4,20 +4,118 @@ Created on Thu Feb 18 18:46:36 2016
 
 @author: hjalmar
 """
-#import termios
-#import fcntl
-#import sys
-#import os
 import numpy as np
-# Tensorflow has to be imported before Gtk (VideoReader)
-# see https://github.com/tensorflow/tensorflow/issues/1373
-#import tensorflow as tf
+import sys
 from video_tools import VideoReader
-import matplotlib
-matplotlib.use('Agg')
-from matplotlib import pyplot as plt
-import matplotlib.patches as patches
-import ipdb
+from scipy.interpolate import UnivariateSpline
+from scipy.ndimage.filters import gaussian_filter1d
+
+
+def contiguous_regions(b, minlen=1):
+    """
+    Finds contiguous True regions of the boolean array "b". Returns
+    a 2D array where the first column is the start index of the region and the
+    second column is the end index.
+
+    Parameters
+    ----------
+    b       - an array of booleans
+    minlen  - minimum length of contigous region to accept
+
+    Returns
+    -------
+    idx     - 2D array where the first column is the start index of the region
+              and the second column is the end index
+
+    From Stackoverflow:
+        http://stackoverflow.com/questions/4494404/
+        find-large-number-of-consecutive-values-fulfilling-
+        condition-in-a-numpy-array
+    """
+    # Find the indicies of changes in "b"
+    d = np.diff(b)
+    idx, = d.nonzero()
+    # We need to start things after the change in "b".
+    # Therefore, we'll shift the index by 1 to the right.
+    idx += 1
+    # If the start of condition is True prepend a 0
+    if b[0]:
+        idx = np.r_[0, idx]
+    # If the end of condition is True, append the length of the array
+    if b[-1]:
+        idx = np.r_[idx, b.size]
+    # Reshape the result into two columns
+    idx.shape = (-1, 2)
+    # Remove indeci for contigous regions shorter than minlen
+    bix = (np.diff(idx) >= minlen).flatten()
+
+    return idx[bix]
+    
+    
+def smooth(y, sigma, axis=-1, interpolation='spline'):
+    """
+    Does spline interpolation of missing values (NaNs) before gaussian smoothing.
+    """
+    
+    y = y.copy()
+    x = np.arange(y.shape[axis])    
+
+    if y.ndim == 1:
+        w = np.isnan(y)
+    
+        if w.any():
+            
+            if interpolation == 'spline':
+                y[w] = 0.
+                spl = UnivariateSpline(x, y, w=~w, k=3)
+                y[w] = spl(x[w])
+            elif interpolation == 'linear':
+                cregs = contiguous_regions(w, minlen=1)
+                for cr in cregs:
+                    if cr[0] > 0:
+                        y0 = y[cr[0]-1]
+                    else:
+                        y0 = y[cr[1]+1]
+                    
+                    if cr[1] < y.shape[0]:
+                        y1 = y[cr[1]]
+                    else:
+                        y1 = y[cr[0]-1]
+                    y[cr[0]: cr[1]] = np.linspace(y0, y1, cr[1]-cr[0]+2)[1:-1]
+
+    elif y.ndim == 2:
+
+        if axis == 0:
+            y = y.T
+        else:
+            axis = 1
+                
+        for i in range(y.shape[0]):
+            w = np.isnan(y[i])
+            if w.any():
+                if interpolation == 'spline':
+                    y[i, w] = 0.
+                    spl = UnivariateSpline(x, y[i], w=(~w).astype(int), k=3)
+                    y[i, w] = spl(x[w])
+                elif interpolation == 'linear':
+                    cregs = contiguous_regions(w, minlen=1)
+                    for cr in cregs:
+                        if cr[0] > 0:
+                            y0 = y[i, cr[0]-1]
+                        else:
+                            y0 = y[i, cr[1]+1]
+                        
+                        if cr[1] < y.shape[0]:
+                            y1 = y[i, cr[1]]
+                        else:
+                            y1 = y[i, cr[0]-1]
+                        y[i, cr[0]: cr[1]] = np.linspace(y0, y1, cr[1]-cr[0]+2)[1:-1]                    
+
+    else:
+        raise ValueError('Only 1 or 2 dimensional input arrays are supported.')                                
+                                                
+    
+    return gaussian_filter1d(y, sigma, axis=axis)
 
 
 def HeSD(layer_shape):
@@ -50,97 +148,22 @@ def softmax(logits):
     See issue #2810 on github.com/tensorflow/tensorflow/issues  
     """
     e = np.exp(logits)
-    return e / e.sum(axis=1,  keepdims=True)    
+    return e / e.sum(axis=1,  keepdims=True)
     
 
-def get_window(image,  win_sz,  center):
-    """
-    center - (r, c)
-    """    
-    im_nr, im_nc = image.shape  # number of rows, columns in image
-    w_sz = win_sz
-    #centers = self.levels[k].centers
-    win = np.empty((win_sz,  win_sz))
-    ir0 = int(round(center[0]-w_sz/2))
-    ir1 = int(round(center[0]+w_sz/2))
-    ic0 = int(round(center[1]-w_sz/2))
-    ic1 = int(round(center[1]+w_sz/2))
-
-    if (ir0 < 0) and (ic0 < 0):
-        tmp = image[:ir1, :ic1]
-        # Whiten
-        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-        # subtract mean and divide by standard deviation
-        win[-ir0:, -ic0:] = (tmp - tmp.mean()) / adj_std
-        # pad with white noise
-        win[:, :-ic0] = np.random.standard_normal(size=(w_sz, -ic0))
-        win[:-ir0, :] = np.random.standard_normal(size=(-ir0, w_sz))
-    elif (ir0 < 0) and ((ic0 >= 0) and (ic1 <= im_nc)):
-        tmp = image[:ir1, ic0:ic1]
-        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-        win[-ir0:, :] = (tmp - tmp.mean()) / adj_std
-        win[:-ir0, :] = np.random.standard_normal(size=(-ir0, w_sz))
-    elif (ir0 < 0) and (ic1 > im_nc):
-        tmp = image[:ir1, ic0:]
-        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-        win[-ir0:, :im_nc-ic0] = (tmp - tmp.mean()) / adj_std
-        win[:, im_nc-ic0:] = np.random.standard_normal(size=(w_sz, w_sz-tmp.shape[1]))
-        win[:-ir0, :] = np.random.standard_normal(size=(-ir0, w_sz))
-    elif ((ir0 >= 0) and (ir1 <= im_nr)) and (ic0 < 0):
-        tmp = image[ir0:ir1, :ic1]
-        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-        win[:, -ic0:] = (tmp - tmp.mean()) / adj_std
-        win[:, :-ic0] = np.random.standard_normal(size=(w_sz, -ic0))
-    elif ((ir0 >= 0) and (ir1 <= im_nr)) and ((ic0 >= 0) and (ic1 <= im_nc)):
-        tmp = image[ir0:ir1, ic0:ic1]
-        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-        win[:, :] = (tmp - tmp.mean()) / adj_std
-    elif ((ir0 >= 0) and (ir1 <= im_nr)) and (ic1 > im_nc):
-        tmp = image[ir0:ir1, ic0:]
-        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-        win[:, :im_nc-ic0] = (tmp - tmp.mean()) / adj_std
-        win[:, im_nc-ic0:] = np.random.standard_normal(size=(w_sz, w_sz-tmp.shape[1]))
-    elif (ir1 > im_nr) and (ic0 < 0):
-        tmp = image[ir0:, :ic1]
-        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-        win[:im_nr-ir0, -ic0:] = (tmp - tmp.mean()) / adj_std
-        win[:, :-ic0] = np.random.standard_normal(size=(w_sz, -ic0))
-        win[im_nr-ir0:, :] = np.random.standard_normal(size=(w_sz-tmp.shape[0], w_sz))
-    elif (ir1 > im_nr) and((ic0 >= 0) and (ic1 <= im_nc)):
-        tmp = image[ir0:, ic0:ic1]
-        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-        win[:im_nr-ir0, :] = (tmp - tmp.mean()) / adj_std
-        win[im_nr-ir0:, :] = np.random.standard_normal(size=(w_sz-tmp.shape[0], w_sz))
-    elif (ir1 > im_nr) and (ic1 > im_nc):
-        tmp = image[ir0:, ic0:]
-        adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-        win[:im_nr-ir0, :im_nc-ic0] = (tmp - tmp.mean()) / adj_std
-        win[:, im_nc-ic0:] = np.random.standard_normal(size=(w_sz, w_sz-tmp.shape[1]))
-        win[im_nr-ir0:, :] = np.random.standard_normal(size=(w_sz-tmp.shape[0], w_sz))
+class CountdownPrinter:
     
-    return win
+    def __init__(self, N):
+        self.N = int(N)
+        self.ndigits = len(str(N))
+        self.fmt = '%' + '0%dd' % self.ndigits
+        self.clear = '\b'*self.ndigits
+    def print(self, i):
+        sys.stdout.flush()
+        sys.stdout.write(self.fmt % (self.N - i))
+        sys.stdout.flush()
+        sys.stdout.write(self.clear)
 
-#
-#def whiten(X):
-#    """
-#    As tensorflow.image.per_image_whitening(image)
-#    https://www.tensorflow.org/versions/r0.7/api_docs/python/image.html#per_image_whitening
-#    """
-#    if X.ndim == 3:
-#        Y = X.reshape((X.shape[0], -1))
-#        m = Y.mean(axis=1)
-#        adjusted_std = np.concatenate((Y.std(axis=1),
-#                                       np.repeat(1.0/np.sqrt(Y.shape[1]),
-#                                                 Y.shape[0])))
-#        adjusted_std = adjusted_std.reshape((-1, 2)).max(axis=1)   
-#        adjusted_std = adjusted_std.repeat(np.prod(X.shape[-2:])).reshape(X.shape)
-#        m = m.repeat(np.prod(X.shape[-2:])).reshape(X.shape)        
-#    else:
-#        adjusted_std = max(X.std(), 1.0/np.sqrt(X.size))
-#        m = X.mean()
-#
-#    return (X - m) / adjusted_std
-#
 
 def get_input(q_str, ans_type, default=None, check=False):
     """
@@ -233,17 +256,25 @@ class FrameStepper:
         and <= the total video duration.
         """
         self.frame = self.vr.get_frame(t)
-        self.t = self.vr.get_current_position(fmt='time')
-        self.n = self.vr.get_current_position(fmt='frame_number')
-        if self.n is None:
-            self.n = self.t*self.vr.fps
+        
+        if self.frame is None:
+            return False
+        
+        else:
+            
+            self.t = self.vr.get_current_position(fmt='time')
+            self.n = self.vr.get_current_position(fmt='frame_number')
+            if self.n is None:
+                self.n = self.t*self.vr.fps
+                
+            return True
 
     def read_frame(self, frame_num):
         """
         Read frame number frame_num. frame_num has to be >= to 0,
         and <= the total number of frames in video.
         """
-        self.read_t(self, frame_num / self.vr.fps)
+        self.read_t(frame_num * self.dt)
 
     def next(self):
         """
@@ -251,11 +282,16 @@ class FrameStepper:
         Cannot be last frame.
         """
         self.frame = self.vr.get_next_frame()
-        self.t = self.vr.get_current_position(fmt='time')
-        self.n = self.vr.get_current_position(fmt='frame_number')
-
-        if self.n is None:
-            self.n = self.t*self.vr.fps
+        if self.frame is None:
+            return False
+        else:
+            self.t = self.vr.get_current_position(fmt='time')
+            self.n = self.vr.get_current_position(fmt='frame_number')
+    
+            if self.n is None:
+                self.n = self.t*self.vr.fps
+                
+            return True
 
     def previous(self):
         """
@@ -266,12 +302,16 @@ class FrameStepper:
             print('Frame NOT updated!\n'
                   'The current frame is already the first.\n'
                   'Previous frame does not exist.')
+            return False
+            
         else:
             self.frame = self.vr.get_frame(self.t - self.dt)
             self.t = self.vr.get_current_position(fmt='time')
             self.n = self.vr.get_current_position(fmt='frame_number')
             if self.n is None:
                 self.n = self.t*self.vr.fps
+                
+            return True
 
     def jump_t(self, jump_dur):
         """
@@ -281,10 +321,19 @@ class FrameStepper:
         """
         t1 = self.vr.get_current_position(fmt='time')
         self.frame = self.vr.get_frame(t1 + jump_dur)
-        self.t = self.vr.get_current_position(fmt='time')
-        self.n = self.vr.get_current_position(fmt='frame_number')
-        if self.n is None:
-            self.n = self.t*self.vr.fps
+        
+        if self.frame is None:
+
+            return False
+            
+        else:            
+            self.t = self.vr.get_current_position(fmt='time')
+            self.n = self.vr.get_current_position(fmt='frame_number')
+            if self.n is None:
+                self.n = self.t*self.vr.fps
+            
+            return True
+        
 
     def jump_nf(self, nframes):
         """
@@ -293,261 +342,13 @@ class FrameStepper:
         less than the total number of frames in the video.
         """
         jump_dur = nframes*self.dt
-        self.jump_t(jump_dur)
+        return self.jump_t(jump_dur)
 
     def close(self):
         """
         Close the video.
         """
         self.vr.close()
-
-
-#def window_level0(im):
-#    """
-#    """
-#
-#    if im.shape != (76, 102):
-#        print('im needs to have shape == (76, 108)')
-#        return 0
-#
-#    # possibly 48, should give 
-#    w_sz = 40
-#    step = int(w_sz/2)
-#    im_nr, im_nc = im.shape
-#    offset_c = -int(w_sz*(np.ceil(im_nc/w_sz)-(im_nc/w_sz))/2)
-#    offset_r = -int(w_sz*(np.ceil(im_nr/w_sz)-(im_nr/w_sz))/2)
-#    
-#    im_r0 = [offset_r, offset_r, offset_r, offset_r, offset_r,                   # 1st row
-#             offset_r+step, offset_r+step, offset_r+step,       # 2nd row
-#             offset_r+2*step, offset_r+2*step, offset_r+2*step, offset_r+2*step, offset_r+2*step] # 3rd and last row
-#             
-#    im_c0 = [offset_c, offset_c+step, offset_c+2*step, offset_c+3*step, offset_c+4*step,  # cols in 1st row
-#             offset_c, offset_c+2*step, offset_c+4*step,                  # cols in 2nd row
-#             offset_c, offset_c+step, offset_c+2*step, offset_c+3*step, offset_c+4*step]  # cols in 3rd row 
-#    
-#    wins = np.empty((len(im_r0), w_sz, w_sz))
-#    centers = np.empty((len(im_r0), 2))
-#
-#    i = 0
-#    for ir0, ic0 in zip(im_r0, im_c0):
-#
-#        ir1 = ir0 + w_sz            
-#        ic1 = ic0 + w_sz
-#        centers[i,:] = ir0 + w_sz//2, ic0 + w_sz//2
-#        win = wins[i, :, :]
-#
-#        if (ir0 < 0) and (ic0 < 0):
-#            tmp = im[:ir1, :ic1]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, -offset_r:, -offset_c:] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, :, :-offset_c] = np.random.standard_normal(size=(w_sz, -offset_c))
-#            wins[i, :-offset_r, :] = np.random.standard_normal(size=(-offset_r, w_sz))
-#        elif (ir0 < 0) and ((ic0 >= 0) and (ic1 <= im_nc)):
-#            tmp = im[:ir1, ic0:ic1]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, -offset_r:, :] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, :-offset_r, :] = np.random.standard_normal(size=(-offset_r, w_sz))
-#        elif (ir0 < 0) and (ic1 > im_nc):
-#            tmp = im[:ir1, ic0:]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, -offset_r:, :offset_c] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, :, offset_c:] = np.random.standard_normal(size=(w_sz, -offset_c))
-#            wins[i, :-offset_r, :] = np.random.standard_normal(size=(-offset_r, w_sz))
-#        elif ((ir0 >= 0) and (ir1 <= im_nr)) and (ic0 < 0):
-#            tmp = im[ir0:ir1, :ic1]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, :, -offset_c:] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, :, :-offset_c] = np.random.standard_normal(size=(w_sz, -offset_c))
-#        elif ((ir0 >= 0) and (ir1 <= im_nr)) and ((ic0 >= 0) and (ic1 <= im_nc)):
-#            tmp = im[ir0:ir1, ic0:ic1]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, :, :] = (tmp - tmp.mean()) / adj_std
-#        elif ((ir0 >= 0) and (ir1 <= im_nr)) and (ic1 > im_nc):
-#            tmp = im[ir0:ir1, ic0:]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, :, :offset_c] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, :, offset_c:] = np.random.standard_normal(size=(w_sz, -offset_c))
-#        elif (ir1 > im_nr) and (ic0 < 0):
-#            tmp = im[ir0:, :ic1]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, :offset_r, -offset_c:] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, :, :-offset_c] = np.random.standard_normal(size=(w_sz, -offset_c))
-#            wins[i, offset_r:, :] = np.random.standard_normal(size=(-offset_r, w_sz))
-#        elif (ir1 > im_nr) and((ic0 >= 0) and (ic1 <= im_nc)):
-#            tmp = im[ir0:, ic0:ic1]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            win[:offset_r, :] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, offset_r:, :] = np.random.standard_normal(size=(-offset_r, w_sz))
-#        elif (ir1 > im_nr) and (ic1 > im_nc):
-#            tmp = im[ir0:, ic0:]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, :offset_r, :offset_c] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, :, offset_c:] = np.random.standard_normal(size=(w_sz, -offset_c))
-#            wins[i, offset_r:, :] = np.random.standard_normal(size=(-offset_r, w_sz))
-#        i += 1
-#
-#    return wins, centers
-#
-#
-#def window_level1(im, center):
-#    """
-#    """
-#    
-#    if im.shape != (76, 102):
-#        print('im needs to have shape == (76, 108)')
-#        return 0
-#
-#    level0_step = 20
-#    w_sz = 32
-#    subim_sz = level0_step + w_sz
-#    step = int(level0_step/2)
-#    im_nr, im_nc = im.shape
-#
-#    offset_r = int(round(center[0] - subim_sz/2))
-#    offset_c = int(round(center[1] - subim_sz/2))
-#
-#    im_r0 = [offset_r, offset_r, offset_r,
-#             step+offset_r, step+offset_r, step+offset_r,
-#             2*step+offset_r, 2*step+offset_r, 2*step+offset_r]
-#    im_c0 = [offset_c, step+offset_c, 2*step+offset_c,
-#             offset_c, step+offset_c, 2*step+offset_c,
-#             offset_c, step+offset_c, 2*step+offset_c]
-#    
-#    wins = np.empty((len(im_r0), w_sz, w_sz))
-#    centers = np.empty((len(im_r0), 2))
-#
-#    i = 0
-#    for ir0, ic0 in zip(im_r0, im_c0):
-#
-#        ir1 = ir0 + w_sz            
-#        ic1 = ic0 + w_sz
-#        centers[i,:] = ir0 + w_sz//2, ic0 + w_sz//2
-#        win = wins[i, :, :]
-#
-#        if (ir0 < 0) and (ic0 < 0):
-#            tmp = im[:ir1, :ic1]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, -ir0:, -ic0:] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, :, :-ic0] = np.random.standard_normal(size=(w_sz, -ic0))
-#            wins[i, :-ir0, :] = np.random.standard_normal(size=(-ir0, w_sz))
-#        elif (ir0 < 0) and ((ic0 >= 0) and (ic1 <= im_nc)):
-#            tmp = im[:ir1, ic0:ic1]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, -ir0:, :] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, :-ir0, :] = np.random.standard_normal(size=(-ir0, w_sz))
-#        elif (ir0 < 0) and (ic1 > im_nc):
-#            tmp = im[:ir1, ic0:]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, -ir0:, :im_nc-ic0] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, :, im_nc-ic0:] = np.random.standard_normal(size=(w_sz, w_sz-tmp.shape[1]))
-#            wins[i, :-ir0, :] = np.random.standard_normal(size=(-ir0, w_sz))
-#        elif ((ir0 >= 0) and (ir1 <= im_nr)) and (ic0 < 0):
-#            tmp = im[ir0:ir1, :ic1]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, :, -ic0:] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, :, :-ic0] = np.random.standard_normal(size=(w_sz, -ic0))
-#        elif ((ir0 >= 0) and (ir1 <= im_nr)) and ((ic0 >= 0) and (ic1 <= im_nc)):
-#            tmp = im[ir0:ir1, ic0:ic1]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, :, :] = (tmp - tmp.mean()) / adj_std
-#        elif ((ir0 >= 0) and (ir1 <= im_nr)) and (ic1 > im_nc):
-#            tmp = im[ir0:ir1, ic0:]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, :, :im_nc-ic0] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, :, im_nc-ic0:] = np.random.standard_normal(size=(w_sz, w_sz-tmp.shape[1]))
-#        elif (ir1 > im_nr) and (ic0 < 0):
-#            tmp = im[ir0:, :ic1]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, :im_nr-ir0, -ic0:] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, :, :-ic0] = np.random.standard_normal(size=(w_sz, -ic0))
-#            wins[i, im_nr-ir0:, :] = np.random.standard_normal(size=(w_sz-tmp.shape[0], w_sz))
-#        elif (ir1 > im_nr) and((ic0 >= 0) and (ic1 <= im_nc)):
-#            tmp = im[ir0:, ic0:ic1]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            win[:im_nr-ir0, :] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, im_nr-ir0:, :] = np.random.standard_normal(size=(w_sz-tmp.shape[0], w_sz))
-#        elif (ir1 > im_nr) and (ic1 > im_nc):
-#            tmp = im[ir0:, ic0:]
-#            # Whiten
-#            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-#            # subtract mean and divide by standard deviation
-#            wins[i, :im_nr-ir0, :im_nc-ic0] = (tmp - tmp.mean()) / adj_std
-#            # pad with white noise
-#            wins[i, :, im_nc-ic0:] = np.random.standard_normal(size=(w_sz, w_sz-tmp.shape[1]))
-#            wins[i, im_nr-ir0:, :] = np.random.standard_normal(size=(w_sz-tmp.shape[0], w_sz))
-#        i += 1
-#    
-#    return wins, centers
-
-def closest_coordinate(r, c, coordinates):
-    """
-    Parameters
-    ----------------
-    r                    - row index
-    c                   - column index
-    coordinates  - 2-d numpy.array of row and column indexes.
-                   centers[:, 0] -- row indexes
-                   centers[:, 1] -- columns indexes
-                   Eg np.array([[r0, c0], [r1, c1], [r2, c2]])
-    Returns
-    -----------
-    c        -    the center/coordinates closest to (r, c)
-    i        -    index of c in centers
-    """
-    
-    i = np.argmin(np.abs(coordinates - [r, c]).sum(axis=1))
-    c = coordinates[i, :]
-    
-    return c, i
 
 
 def get_max_gaze_line(angle, x, y, im_w, im_h, margin=10, units='deg'):
@@ -704,7 +505,7 @@ def angle2class(angles, Nclass, angles_ok=None, units='deg'):
         if np.isscalar(y):
             if y == (Nclass-1):
                 y = 0
-            if ~ angle_ok:
+            if angles_ok is None:
                 y = Nclass - 1
         else:
             y[y == Nclass] = 0
@@ -722,140 +523,8 @@ def class2angle(y,  Nclass):
     """
     angles = y * (360 / Nclass) + 180 / Nclass # angles run from -180:180
     return angles - 180
-
     
-def dist2coordinates(r, c, coordinates):
-    """
-    Returns the coordinate with minimum distance to r & c,
-    and those coordinates with distances within 129% of the minimum distance.
-    
-    129% is chosen because the smallest patch is 32x32 and the overlap is 50%.
-    If the head is located on the line between two neighboring patches the 
-    longest distance to the closest patch will be 8 (equidistant between the 2).
-    The ratio of the distances will be 8/8 = 1. If the head but shifted 1 element
-    (ie the smallest possible shift) towards one of them, the ratio of their 
-    distances will be (8+1)/(8-1) = 1.2857... (if the head is shifted 2 elements
-    the ratio will be (8+2/(8-2) = 1.666... ).
-    In the cases where 
-
-    Parameters
-    ----------------
-    r                    - row index
-    c                   - column index
-    coordinates  - 2-d numpy.array of row and column indexes.
-                   centers[:, 0] -- row indexes
-                   centers[:, 1] -- columns indexes
-                   Eg np.array([[r0, c0], [r1, c1], [r2, c2]])
-    Returns
-    d
-    i          - index of d in coordinates.
-    -----------
-
-    """
-
-    dists = np.sqrt(((coordinates - [r,  c])**2).sum(axis=1))
-    sorted_idx = np.argsort(dists)
-    dists = dists[sorted_idx]
-    min_dist = dists.min()
-    if min_dist == 0:
-        norm_dists = dists/1
-    else:
-        norm_dists = dists/dists.min()        
-
-    #d = dists[norm_dists < 1.67]
-    #i = sorted_idx[norm_dists < 1.67]
-    d = dists[norm_dists < 1.3]
-    i = sorted_idx[norm_dists < 1.3]    
-    
-    return d,  i
-    
-    
-def window_image(image, win_sz=48, nwin_c=4, nwin_r=3, step=24):
-    """
-    """
-
-    im_nr, im_nc = image.shape
    
-    offset_c = int(0.5*(im_nc - (nwin_c+1)*win_sz/2))
-    offset_r = int(0.5*(im_nr - (nwin_r+1)*win_sz/2))
-
-    im_r0 = [offset_r] * nwin_c # 1st row
-    im_r0.extend([offset_r + step] * nwin_c) # 2nd row
-    im_r0.extend([offset_r + 2 * step] * nwin_c) # 2nd row
-    
-    im_c0 = [offset_c, offset_c + step,
-             offset_c + 2 * step, offset_c + 3 * step] * nwin_r
-             
-    nwin = int(nwin_r * nwin_c)
-    centers = np.empty((nwin, 2))
-    wins = np.empty((nwin, win_sz, win_sz))                 
- 
-    w_sz = win_sz
-    
-    i = 0
-    for ir0, ic0 in zip(im_r0, im_c0):
-
-        ir1 = ir0 + w_sz            
-        ic1 = ic0 + w_sz
-        centers[i,:] = ir0 + w_sz//2, ic0 + w_sz//2
-        win = wins[i, :, :]
-
-        if (ir0 < 0) and (ic0 < 0):
-            tmp = image[:ir1, :ic1]
-            # Whiten
-            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))  # std
-            # subtract mean and divide by standard deviation
-            wins[i, -ir0:, -ic0:] = (tmp - tmp.mean()) / adj_std
-            # pad with white noise
-            wins[i, :, :-ic0] = np.random.standard_normal(size=(w_sz, -ic0))
-            wins[i, :-ir0, :] = np.random.standard_normal(size=(-ir0, w_sz))
-        elif (ir0 < 0) and ((ic0 >= 0) and (ic1 <= im_nc)):
-            tmp = image[:ir1, ic0:ic1]
-            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-            wins[i, -ir0:, :] = (tmp - tmp.mean()) / adj_std
-            wins[i, :-ir0, :] = np.random.standard_normal(size=(-ir0, w_sz))
-        elif (ir0 < 0) and (ic1 > im_nc):
-            tmp = image[:ir1, ic0:]
-            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-            wins[i, -ir0:, :im_nc-ic0] = (tmp - tmp.mean()) / adj_std
-            wins[i, :, im_nc-ic0:] = np.random.standard_normal(size=(w_sz, w_sz-tmp.shape[1]))
-            wins[i, :-ir0, :] = np.random.standard_normal(size=(-ir0, w_sz))
-        elif ((ir0 >= 0) and (ir1 <= im_nr)) and (ic0 < 0):
-            tmp = image[ir0:ir1, :ic1]
-            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-            wins[i, :, -ic0:] = (tmp - tmp.mean()) / adj_std
-            wins[i, :, :-ic0] = np.random.standard_normal(size=(w_sz, -ic0))
-        elif ((ir0 >= 0) and (ir1 <= im_nr)) and ((ic0 >= 0) and (ic1 <= im_nc)):
-            tmp = image[ir0:ir1, ic0:ic1]
-            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-            wins[i, :, :] = (tmp - tmp.mean()) / adj_std
-        elif ((ir0 >= 0) and (ir1 <= im_nr)) and (ic1 > im_nc):
-            tmp = image[ir0:ir1, ic0:]
-            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-            wins[i, :, :im_nc-ic0] = (tmp - tmp.mean()) / adj_std
-            wins[i, :, im_nc-ic0:] = np.random.standard_normal(size=(w_sz, w_sz-tmp.shape[1]))
-        elif (ir1 > im_nr) and (ic0 < 0):
-            tmp = image[ir0:, :ic1]
-            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-            wins[i, :im_nr-ir0, -ic0:] = (tmp - tmp.mean()) / adj_std
-            wins[i, :, :-ic0] = np.random.standard_normal(size=(w_sz, -ic0))
-            wins[i, im_nr-ir0:, :] = np.random.standard_normal(size=(w_sz-tmp.shape[0], w_sz))
-        elif (ir1 > im_nr) and((ic0 >= 0) and (ic1 <= im_nc)):
-            tmp = image[ir0:, ic0:ic1]
-            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-            win[:im_nr-ir0, :] = (tmp - tmp.mean()) / adj_std
-            wins[i, im_nr-ir0:, :] = np.random.standard_normal(size=(w_sz-tmp.shape[0], w_sz))
-        elif (ir1 > im_nr) and (ic1 > im_nc):
-            tmp = image[ir0:, ic0:]
-            adj_std = max(tmp.std(), 1.0 / np.sqrt(tmp.size))
-            wins[i, :im_nr-ir0, :im_nc-ic0] = (tmp - tmp.mean()) / adj_std
-            wins[i, :, im_nc-ic0:] = np.random.standard_normal(size=(w_sz, w_sz-tmp.shape[1]))
-            wins[i, im_nr-ir0:, :] = np.random.standard_normal(size=(w_sz-tmp.shape[0], w_sz))
-        i += 1
-            
-    return wins, centers
-        
-
 def whiten(image):
     """
     """

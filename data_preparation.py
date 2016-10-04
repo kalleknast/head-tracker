@@ -6,9 +6,7 @@ Created on Wed Feb  3 14:33:25 2016
 """
 
 
-from ht_helper import get_input, FrameStepper,  closest_coordinate
-from ht_helper import dist2coordinates,  angle2class
-from ht_helper import get_window, get_gaze_line
+from ht_helper import get_input, FrameStepper, CountdownPrinter
 import matplotlib.pyplot as plt
 from datetime import datetime
 from scipy.misc import imresize
@@ -16,9 +14,7 @@ from time import sleep
 from glob import glob
 import numpy as np
 import warnings
-import sys
 import tensorflow as tf
-import re
 
 warnings.simplefilter("ignore")
 
@@ -47,11 +43,11 @@ class LabelFrames:
         # Open output log file.
         self.f = open(self.log_fname, 'w')
         self.figsize = [8.125, 6.125]
-        self.fstp = FrameStepper(self.video_fname)
-        self.available_nf = self.fstp.tot_n
-        self.frame = self.fstp.frame
-        self.frame_num = self.fstp.n
-        self.frame_time = self.fstp.t
+        self.fst = FrameStepper(self.video_fname)
+        self.available_nf = self.fst.tot_n
+        self.frame = self.fst.frame
+        self.frame_num = self.fst.n
+        self.frame_time = self.fst.t
 
         self.fig = plt.figure(figsize=self.figsize)
         self.ax = self.fig.add_axes([0.01, 0.01, 0.97, 0.97])
@@ -77,11 +73,37 @@ class LabelFrames:
                                 # width of head including tufts
         # Write the header to the log file.
         self._write_log(write_header=True)
+        
 
-    def run_batch(self, t0, seq_len=200, n_seqs=10):
+    def run_spacedbatch(self, t0=0.2, batch_size=1000):
         """
         """
-        self.max_skip = self.fstp.duration - seq_len * (n_seqs - 1) * self.fstp.dt - t0
+        self.batch_size = batch_size
+        n_skip = self.fst.tot_n // batch_size
+        
+        frame_num = int(t0 / self.fst.dt)
+        while frame_num <= self.fst.tot_n:
+            self.fst.read_frame(frame_num)
+            self.frame = self.fst.frame
+            self.frame_num = self.fst.n
+            self.frame_time = self.fst.t            
+            self._annote(1, batch_type='spaced')
+            
+            if self.head_position_ok:
+                self._write_log(write_header=False)
+                self.num_labelled += 1  
+
+            frame_num = np.random.randint(3, 2*n_skip-1) + self.frame_num
+
+        print('Batch complete.\n%d frames labelled.' % self.num_labelled)            
+
+        self.close()
+        
+
+    def run_sequentialbatch(self, t0, seq_len=200, n_seqs=10):
+        """
+        """
+        self.max_skip = self.fst.duration - seq_len * (n_seqs - 1) * self.fst.dt - t0
         self.max_skip /= (n_seqs - 1)
         self.available_nf - seq_len * n_seqs
 
@@ -95,7 +117,7 @@ class LabelFrames:
                     break
                 # Start time for next sequence.
                 # Random drawn from the interval [1/fps, max_skip+1/fps) s.
-                t0 = self.frame_time + np.random.random() * self.max_skip + self.fstp.dt
+                t0 = self.frame_time + np.random.random() * self.max_skip + self.fst.dt
             else:
                 print('Batch complete.\n%d frames labelled.' %
                       self.num_labelled)
@@ -107,22 +129,22 @@ class LabelFrames:
         """
 
         self._seq_len = seq_len
-        self.fstp.read_t(t0)
-        self.frame = self.fstp.frame
-        self.frame_num = self.fstp.n
-        self.frame_num_start = self.fstp.n
-        self.frame_num_end = self.fstp.n + seq_len
-        self.frame_time = self.fstp.t
+        self.fst.read_t(t0)
+        self.frame = self.fst.frame
+        self.frame_num = self.fst.n
+        self.frame_num_start = self.fst.n
+        self.frame_num_end = self.fst.n + seq_len
+        self.frame_time = self.fst.t
 
         self._annote(self.frame_num-self.frame_num_start+1)
         self._write_log(write_header=False)
 
         for i in range(1, seq_len + 1):
-            self.fstp.next()
-            self.frame = self.fstp.frame
-            self.frame_num = self.fstp.n
-            self.frame_time = self.fstp.t
-            self._annote(self.frame_num-self.frame_num_start + 1)
+            self.fst.next()
+            self.frame = self.fst.frame
+            self.frame_num = self.fst.n
+            self.frame_time = self.fst.t
+            self._annote(self.frame_num-self.frame_num_start + 1, batch_type='sequential')
             if self.head_position_ok:
                 self._write_log(write_header=False)
                 self.num_labelled += 1
@@ -166,7 +188,7 @@ class LabelFrames:
         self.f.write(s)
 
 
-    def _annote(self, frame_num_in_seq):
+    def _annote(self, frame_num_in_seq, batch_type='sequential'):
         """
         """
         redo = True
@@ -178,11 +200,19 @@ class LabelFrames:
             self.ax.imshow(self.frame, origin='lower')
             self.ax.set_xticks([])
             self.ax.set_yticks([])
+            
+            if batch_type == 'sequential':
+                s = ('start: %d, end: %d, current: %d, remaining: %d' %
+                     (self.frame_num_start, self.frame_num_end,
+                      self.frame_num_start + frame_num_in_seq,
+                      self._seq_len - frame_num_in_seq))
+            elif batch_type == 'spaced':
+                s = ('time: %1.2fs, current: %d, remaining: ≈ %d' %
+                     (self.frame_time, self.num_labelled,
+                      self.batch_size - self.num_labelled))
+            else:
+                raise ValueError('Unknown batch_type specified: %s' % batch_type)
 
-            s = ('start: %d, end: %d, current: %d, remaining: %d' %
-                 (self.frame_num_start, self.frame_num_end,
-                  self.frame_num_start + frame_num_in_seq,
-                  self._seq_len - frame_num_in_seq))
             txt0 = self.ax.text(self.imwdt-5, 5, s, va='bottom',
                                 ha='right', fontsize=12, color=[0.4, 0.8, 0.2])
 
@@ -292,7 +322,7 @@ class LabelFrames:
         """
         
         """
-        self.fstp.vr.close()
+        self.fst.vr.close()
         self.f.close()
 
 
@@ -389,8 +419,8 @@ def plot_head_data(log_fname, video_fname):
     """
     head_backwrd_shift = 0.6
     figsize = [8.125, 6.125]
-    fstp = FrameStepper(video_fname)
-    frame = fstp.frame
+    fst = FrameStepper(video_fname)
+    frame = fst.frame
 
     fig = plt.figure(figsize=figsize)
     ax = fig.add_axes([0.01, 0.01, 0.97, 0.97])
@@ -401,9 +431,9 @@ def plot_head_data(log_fname, video_fname):
 
     for i, dat in enumerate(log_data):
 
-        fstp.read_t(dat['frame_time'])
+        fst.read_t(dat['frame_time'])
         ax.cla()
-        ax.imshow(fstp.frame, origin='lower')
+        ax.imshow(fst.frame, origin='lower')
         ax.set_xticks([])
         ax.set_yticks([])
         draw_head_position_and_angle(ax, imwdt, imhgt, head_backwrd_shift, dat)
@@ -411,7 +441,7 @@ def plot_head_data(log_fname, video_fname):
         fig.savefig('test_%d.png' % i)
         sleep(5)
 
-    fstp.close()
+    fst.close()
  
      
 def convert_to_tfrecords(images, angles, angles_ok, positions, fname):   
@@ -485,7 +515,7 @@ def convert_to_tfrecords(images, angles, angles_ok, positions, fname):
 #    return example.SerializeToString()
 
 
-def labeledData2storage_CAM(log_dir, video_dir, data_dir, Ntrain=15000):
+def labeledData2storage_CAM(log_dir, video_dir, data_dir, Ntrain=None, Ndev=3000):
     """
     Trying to maximize resolution while minimizing the number of windows/patches
     to classify per video fram using a Multi Resolution Pyramid.
@@ -495,9 +525,10 @@ def labeledData2storage_CAM(log_dir, video_dir, data_dir, Ntrain=15000):
     log_dir
     video_dir
     data_dir
+    Ntrain
+    Ndev -- 3 000 should be fine for 1% acc differences.
     """
     
-    Ndev = 3000  # 3 000 should be fine for 1% acc differences.
     #head_size = 200  # pixels in 480 x 640 frame
     #scale_factor = 32 / head_size  # TODO improve this 
     scale_factor = 160/640.
@@ -524,84 +555,67 @@ def labeledData2storage_CAM(log_dir, video_dir, data_dir, Ntrain=15000):
             return 0
 
         # To read the frames
-        fstp = FrameStepper(video_fname[0])
+        fst = FrameStepper(video_fname[0])
     
         # Scale head positions to fit rescaled frames.
         log_data['center_x'] = log_data['center_x'] * scale_factor
         log_data['center_y'] = log_data['center_y'] * scale_factor
         # Head angles to degrees (-180 to 180)
         log_data['angle'] = (180 * (log_data['angle'] / np.pi)).round()
+        
+        # Counter printed on command line
+        cdp = CountdownPrinter(log_data.shape[0])
 
         for j, dat in enumerate(log_data):
             # Counter printed on the command line
-            sys.stdout.flush()
-            s = '%04d' % (log_data.shape[0] - j)
-            sys.stdout.write(s)
-            sys.stdout.flush()
-            sys.stdout.write('\b'*len(s))
+            cdp.print(j)        
             # Read the frame
-            fstp.read_t(dat['frame_time'])
-            frame = imresize(fstp.frame.mean(axis=2), scale_factor)
+            fst.read_t(dat['frame_time'])
+            frame = imresize(fst.frame.mean(axis=2), scale_factor)
             frames.append(frame.reshape(frame.shape[0], frame.shape[1], 1))
             angles_ok.append(dat['angle_ok'])
             angles.append(dat['angle'])
             positions_x.append(dat['center_x'])
             positions_y.append(dat['center_y'])
 
-    fstp.close()
+    fst.close()
     # assign to dev and train set, and write
     print('\nSaving labeled data to tfrecords...')
 
     Ntot = len(frames)
     #im_h, im_w = frames[0].shape
-    if Ntrain is None:
+    if Ndev is None and Ntrain is None:
+        Ndev = 3000
         Ntrain = Ntot - Ndev
+    elif Ndev is None and np.isscalar(Ntrain):
+        Ndev = Ntot - Ntrain
+    elif Ntrain is None and np.isscalar(Ndev):
+        Ntrain = Ntot - Ndev
+    elif np.isscalar(Ndev) and np.isscalar(Ntrain):
+        Ndev = Ntot - Ntrain
+        print('Ndev set to :', Ndev)
+    else:
+        import pdb
+        pdb.set_trace()
+        raise ValueError('What do you want?')
+
     rnd_idx = np.random.permutation(Ntot)
     dev_idx = rnd_idx[:Ndev]
     train_idx = rnd_idx[Ndev:]
     train_idx = train_idx[:Ntrain]
     
     images = np.array(frames, dtype=np.uint8)
-    #print('images.shape: ', images.shape)
-    #im_shape = images.shape
     angles = np.array(angles, dtype=np.int64)
     angles_ok = np.array(angles_ok, dtype=np.int64)
     positions = np.recarray(Ntot, dtype=[('x', np.int64),('y', np.int64)])
     positions.x = positions_x
     positions.y = positions_y
         
-    #dev_images = np.empty([Ndev, im_shape[1], im_shape[2], im_shape[3]], dtype=np.uint8)
-    #dev_angles = np.empty([Ndev, 1], dtype=np.int64) 
-    #dev_angles_ok = np.empty([Ndev, 1], dtype=np.int64) 
-    #dev_positions = np.recarray(Ndev, dtype=[('x', np.int64),('y', np.int64)])
-    
-    #dev_images = images[dev_idx]
-    #dev_angles = angles[dev_idx]
-    #dev_angles_ok = angles_ok[dev_idx]
-    #dev_positions = positions[dev_idx]
-
-    #for i,  idx in enumerate(dev_idx):        
-     #   dev_images[i] = images[idx, :, :, :]
-      #  dev_angles[i] = angles[idx]
-       # dev_angles_ok[i] = angles_ok[idx]
-        #dev_positions[i] = positions[idx]
-    dev_fname = '%s/dev_CAM_N%d.tfrecords' % (data_dir.rstrip('/'),  Ndev)
+    dev_fname = '%s/dev_CAM_N%0000d.tfrecords' % (data_dir.rstrip('/'),  Ndev)
     convert_to_tfrecords(images[dev_idx], angles[dev_idx],
                          angles_ok[dev_idx], positions[dev_idx], dev_fname)
-    #convert_to(dev_images, dev_angles, dev_positions, dev_fname)
 
-    #train_images = np.empty([Ntrain, images.shape[1], images.shape[2], images.shape[3]], dtype=np.uint8)
-    #train_angles = np.empty([Ntrain, 1], dtype=np.int64) 
-    #train_angles_ok = np.empty([Ntrain, 1], dtype=np.int64) 
-    #train_positions = np.recarray(Ntrain, dtype=[('x', np.int64),('y', np.int64)])
-
-    #for i,  idx in enumerate(train_idx):        
-     #   train_images[i] = images[idx, :, :, :]
-      #  train_angles[i] = angles[idx]
-       # train_angles_ok[i] = angles_ok[idx]
-        #train_positions[i] = positions[idx]
-    train_fname = '%s/train_CAM_N%d.tfrecords' % (data_dir.rstrip('/'),  Ntrain)
-    #convert_to(train_images, train_angles, train_positions, train_fname)
+    train_fname = '%s/train_CAM_N%000d.tfrecords' % (data_dir.rstrip('/'),  Ntrain)
     convert_to_tfrecords(images[train_idx], angles[train_idx],
                          angles_ok[train_idx], positions[train_idx], train_fname)
         
@@ -609,206 +623,3 @@ def labeledData2storage_CAM(log_dir, video_dir, data_dir, Ntrain=15000):
     print(' Total num:',  Ntot)
     print(' Num train:',  train_idx.shape[0])
     print(' Num dev:',  dev_idx.shape[0])
-
-
-def labeledData2storage_DUAL(log_dir, video_dir, data_dir,
-                             plot=False, plot_dir='.', Nplot=500):
-    """
-    Trying to maximize resolution while minimizing the number of windows/patches
-    to classify per video fram using a Multi Resolution Pyramid.
-    
-    Parameters
-    ----------
-    log_dir
-    video_dir
-    data_dir
-    plot
-    plot_dir
-    Nplot      -- Maximum number of plots to draw.
-    """
-    
-    Ndev = 30000  # 30 000 should be fine for 0.1% acc differences.
-    head_size = 200  # pixels in 480 x 640 frame
-    patch_sz = [48, 32]  # size for level 0 position patches
-    scale_factor = patch_sz[1] / head_size  # TODO improve this 
-    log_fnames = glob(log_dir.rstrip('/') + '/HeadData*.txt')
-    Nlogs = len(log_fnames)    
-    
-    rotation_images = []
-    rotations = []
-    images0,  images1 = [],  []
-    labels0,  labels1 = [],  []
-   
-    for i,  log_fname in enumerate(log_fnames):
-        print('Processing file (%d of %d): %s' % (i+1,  Nlogs,  log_fname.split('/')[-1]))
-
-        log_data, log_header = read_log_data(log_fname)
-        video_fname = '%s/%s' % (video_dir.rstrip('/'), log_header['video_fname'])
-        video_fname = glob(video_fname)
-        if len(video_fname) != 1:
-            print('The video file matching to the log cannot be found in %s'
-                  % video_dir)
-            print('Log file:', log_fname)
-            print('Found video files:', video_fname)
-            return 0
-
-        # To read the frames
-        fstp = FrameStepper(video_fname[0])
-    
-        # Scale head positions to fit rescaled frames.
-        log_data['center_x'] = log_data['center_x'] * scale_factor
-        log_data['center_y'] = log_data['center_y'] * scale_factor
-        # Head angles to degrees (-180 to 180)
-        log_data['angle'] = (180 * (log_data['angle'] / np.pi)).round()
-
-        for j, dat in enumerate(log_data):
-            # Counter printed on the command line
-            sys.stdout.flush()
-            s = '%04d' % (log_data.shape[0] - j)
-            sys.stdout.write(s)
-            sys.stdout.flush()
-            sys.stdout.write('\b'*len(s))
-            # Read the frame
-            fstp.read_t(dat['frame_time'])
-            # Location of positive example, i.e. head
-            pos_x, pos_y = dat['center_x'], dat['center_y']
-            frame = imresize(fstp.frame.mean(axis=2), scale_factor)
-            wins, centers = window_image(frame, win_sz=48, nwin_c=4,
-                                         nwin_r=3, step=24)
-
-            # Head rotation
-            offsets = np.zeros((21, 2))
-            offsets[1:, :] = np.random.randint(-10, 10, (20, 2))
-            offsets += [pos_y,  pos_x]
-            for offset in offsets:
-                if (offset[0] > 0) and (offset[0] < frame.shape[0]) and (offset[1] > 0) and (offset[1] < frame.shape[1]):
-                    rot_im = get_window(frame,  40,  offset)
-                    rot_im -= rot_im.min()
-                    rot_im /= rot_im.max()
-                    rot_im *= 255   
-                    rotation_images.append(rot_im.reshape((40,  40,  1)))
-                    if dat['angle_ok'] == 1:
-                        rotations.append(dat['angle'])
-                    else:
-                        rotations.append(1000) # A hack, head orientations run from -180 to 180, and 1000 codes no discernible head orientation ie angle_ok == 0
-                    
-            d, di = dist2coordinates(pos_y, pos_x, centers)                    
-
-            # Head position LEVEL 0
-            for im_i, image in enumerate(wins):
-                # Append data to storage file.
-                label = int(im_i in di) # # 1 -> Positive Patch, ie w. head, 0 -> no head
-                image = image.reshape([win.shape[0],  win.shape[1],  1])                    
-                image -= image.min()
-                image /= image.max()
-                image *= 255   
-                image = np.uint8(image)                    
-                images0.append(image)
-                labels0.append(label)
-
-            # Head position SLIDE WIN / LEVEL 1
-            c,  ci = closest_coordinate(pos_y, pos_x, centers)
-            offsets = np.random.randint(-10, 10, (20,2))
-            offsets += [int(c[0]),  int(c[1])]
-            for offset in offsets:
-                if (offset[0] > 0) and (offset[0] < frame.shape[0]) and (offset[1] > 0) and (offset[1] < frame.shape[1]):
-                    label = np.sqrt((offset[0] - pos_y)**2 + (offset[1] - pos_x)**2) < 4.5
-                    image = get_window(frame,  32,  offset)
-                    image -= image.min()
-                    image /= image.max()
-                    image *= 255   
-                    images1.append(image.reshape((32,32,1)))
-                    labels1.append(label)                    
-                    
-    fstp.close()
-    
-    # assign to dev and train set, and write
-    print('\nSaving position data to tfrecords...')
-    # Level 0
-    images = np.array(images0)
-    labels = np.array(labels0)
-    Ntot = len(labels)
-    Ntrain = Ntot - Ndev
-    rnd_idx = np.random.permutation(Ntot)
-    dev_idx = rnd_idx[:Ndev]
-    train_idx = rnd_idx[Ndev:]
-        
-    dev_images = np.empty([dev_idx.shape[0],  images.shape[1], images.shape[2],  images.shape[3]],  dtype=np.uint8)
-    dev_labels = np.empty([dev_idx.shape[0],  1]) 
-    for i,  idx in enumerate(dev_idx):        
-        dev_images[i] = images[idx,  :,  :,  :]
-        dev_labels[i] = labels[idx]            
-    dev_fname = '%s/dev_position_level0_N%d.tfrecords' % (data_dir.rstrip('/'),  Ndev)
-    convert_to(dev_images, dev_labels, dev_fname)
-
-    train_images = np.empty([train_idx.shape[0],  images.shape[1], images.shape[2],  images.shape[3]],  dtype=np.uint8)
-    train_labels = np.empty([train_idx.shape[0],  1]) 
-    for i,  idx in enumerate(train_idx):        
-        train_images[i] = images[idx,  :,  :,  :]
-        train_labels[i] = labels[idx,]   
-    train_fname = '%s/train_position_level0_N%d.tfrecords' % (data_dir.rstrip('/'),  Ntrain)
-    convert_to(train_images, train_labels, train_fname)
-        
-    print('\nSaved data for level 0\n%s' % ( '-'*20))
-    print(' Total num:',  Ntot)
-    print(' Num train:',  Ntrain)
-    print(' Num dev:',  Ndev)
-    # Level 1
-    images = np.array(images1)
-    labels = np.array(labels1)
-    Ntot = len(labels)
-    Ntrain = Ntot - Ndev
-    rnd_idx = np.random.permutation(Ntot)
-    dev_idx = rnd_idx[:Ndev]
-    train_idx = rnd_idx[Ndev:]
-    
-    dev_images = np.empty([dev_idx.shape[0],  images.shape[1], images.shape[2],  images.shape[3]],  dtype=np.uint8)
-    dev_labels = np.empty([dev_idx.shape[0],  1]) 
-    for i,  idx in enumerate(dev_idx):        
-        dev_images[i] = images[idx,  :,  :,  :]
-        dev_labels[i] = labels[idx]            
-    dev_fname = '%s/dev_position_level1_N%d.tfrecords' % (data_dir.rstrip('/'),  Ndev)
-    convert_to(dev_images, dev_labels, dev_fname)
-
-    train_images = np.empty([train_idx.shape[0],  images.shape[1], images.shape[2],  images.shape[3]],  dtype=np.uint8)
-    train_labels = np.empty([train_idx.shape[0],  1]) 
-    for i,  idx in enumerate(train_idx):        
-        train_images[i] = images[idx,  :,  :,  :]
-        train_labels[i] = labels[idx,]   
-    train_fname = '%s/train_position_level1_N%d.tfrecords' % (data_dir.rstrip('/'),  Ntrain)
-    convert_to(train_images, train_labels, train_fname)
-        
-    print('\nSaved data for level 1\n%s' % ( '-'*20))
-    print(' Total num:',  Ntot)
-    print(' Num train:',  Ntrain)
-    print(' Num dev:',  Ndev)
-    
-    print('\nSaving rotation data to tfrecords...')
-    images = np.array(rotation_images)
-    labels = np.array(rotations)        
-    Ntot = len(labels)
-    Ntrain = Ntot - Ndev
-    rnd_idx = np.random.permutation(Ntot)
-    dev_idx = rnd_idx[:Ndev]
-    train_idx = rnd_idx[Ndev:]
-        
-    dev_images = np.empty([dev_idx.shape[0],  images.shape[1], images.shape[2],  images.shape[3]],  dtype=np.uint8)
-    dev_labels = np.empty([dev_idx.shape[0],  1]) 
-    for i,  idx in enumerate(dev_idx):        
-        dev_images[i] = images[idx,  :,  :,  :]
-        dev_labels[i] = labels[idx] 
-    dev_fname = '%s/dev_rotation_N%d.tfrecords' % (data_dir.rstrip('/'),  Ndev)
-    convert_to(dev_images, dev_labels, dev_fname)
-
-    train_images = np.empty([train_idx.shape[0],  images.shape[1], images.shape[2],  images.shape[3]],  dtype=np.uint8)
-    train_labels = np.empty([train_idx.shape[0],  1]) 
-    for i,  idx in enumerate(train_idx):        
-        train_images[i] = images[idx,  :,  :,  :]
-        train_labels[i] = labels[idx]   
-    train_fname = '%s/train_rotation_N%d.tfrecords' % (data_dir.rstrip('/'),  Ntrain)
-    convert_to(train_images, train_labels, train_fname)
-        
-    print('\nSaved rotation data\n%s' % ('-'*20))
-    print(' Total num:',  Ntot)
-    print(' Num train:',  Ntrain)
-    print(' Num dev:',  Ndev)   

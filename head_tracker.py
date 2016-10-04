@@ -5,23 +5,19 @@ Created on Sat Jul 30 15:20:09 2016
 @author: hjalmar
 """
 import tensorflow as tf
-from ht_helper import HeSD, angle2class, FrameStepper, class2angle, whiten, anglediff
-from ht_helper import angles2complex, complex2angles, get_gaze_line, softmax, get_max_gaze_line
+from ht_helper import HeSD, angle2class, FrameStepper, class2angle, whiten
+from ht_helper import anglediff, get_max_gaze_line, CountdownPrinter
+from ht_helper import angles2complex, complex2angles, softmax
 from data_preparation import read_log_data
 import numpy as np
 import re
-import sys
 import os
-#from scipy.ndimage.measurements import center_of_mass
 from scipy.misc import imresize
 from glob import glob
 import matplotlib
 matplotlib.use('Agg')
 import matplotlib.pyplot as plt
-import matplotlib.patches as patches
 import matplotlib.animation as manimation
-
-import ipdb
 
 
 class TrainModel:
@@ -32,9 +28,17 @@ class TrainModel:
         if data_dir is None:
             data_dir = '/home/hjalmar/head_tracker/data/CAM/BIG'
         self.data_dir = data_dir.rstrip('/')            
+
+        if not os.path.isdir(data_dir):
+            raise ValueError('data_dir %s\nis not a directory.' %
+                             self.data_dir)
         if model_dir is None:
             model_dir = '/home/hjalmar/head_tracker/model/CAM/BIG'
         self.model_dir = model_dir.rstrip('/')
+        
+        if not os.path.isdir(model_dir):
+            raise ValueError('model_dir %s\nis not a directory.' %
+                             self.model_dir)
         
         self.Nclass = Nclass
         self.im_h = 120
@@ -57,17 +61,17 @@ class TrainModel:
 
             # Even when reading in multiple threads, share the filename
             # queue.
-            image, angle, angle_ok, position_x, position_y = self._read_and_decode(fname_queue)
+            im, angle, angle_ok, pos_x, pos_y = self._read_and_decode(fname_queue)
 
             if train:
-                # Distort image
-                image = self._distort_inputs(image)
+                # Distort im
+                im = self._distort_inputs(im)
                 n_threads = 8
             else:
                 n_threads = 4
                 
             # Subtract off the mean and divide by the variance of the pixels.
-            image = tf.image.per_image_whitening(image)
+            im = tf.image.per_image_whitening(im)
                 
             # Shuffle the examples and collect them into batch_sz batches.
             # (Internally uses a RandomShuffleQueue.)
@@ -76,14 +80,17 @@ class TrainModel:
             min_queue_examples = int(Nex_per_epoch * 0.4)
             capacity = min_queue_examples + 3 * batch_sz
 
-            image, angle, angle_ok, position_x, position_y = tf.train.shuffle_batch([image, angle, angle_ok,
-                                                                                     position_x, position_y],
-                                                                                    batch_size=batch_sz,
-                                                                                    num_threads=n_threads,
-                                                                                    capacity=capacity,
-                                                                                    min_after_dequeue=min_queue_examples)
+            im, angle, angle_ok, pos_x, pos_y = tf.train.shuffle_batch([im,
+                                                                        angle,
+                                                                        angle_ok,
+                                                                        pos_x,
+                                                                        pos_y],
+                                                                        batch_size=batch_sz,
+                                                                        num_threads=n_threads,
+                                                                        capacity=capacity,
+                                                                        min_after_dequeue=min_queue_examples)
                                                                       
-            return image, angle, angle_ok, position_x, position_y
+            return im, angle, angle_ok, pos_x, pos_y
 
     
     def _read_and_decode(self,  fname_queue):
@@ -97,32 +104,32 @@ class TrainModel:
                       'position_x': tf.FixedLenFeature([],  tf.int64),
                       'position_y': tf.FixedLenFeature([],  tf.int64)})
   
-        image = tf.decode_raw(features['image_raw'], tf.uint8)
-        image.set_shape([self.im_h *  self.im_w])
-        image = tf.reshape(image,  [self.im_h,  self.im_w,  1])
+        im = tf.decode_raw(features['image_raw'], tf.uint8)
+        im.set_shape([self.im_h *  self.im_w])
+        im = tf.reshape(im,  [self.im_h,  self.im_w,  1])
       
         # Convert from [0, 255] -> [-0.5, 0.5] floats.
-        image = tf.cast(image, tf.float32) * (1. / 255) - 0.5        
+        im = tf.cast(im, tf.float32) * (1. / 255) - 0.5        
         # Convert label from a scalar uint8 tensor to an int32 scalar.
         angle = tf.cast(features['angle'], tf.int32)
         angle_ok = tf.cast(features['angle_ok'], tf.int32)
         position_x = tf.cast(features['position_x'], tf.int32)        
         position_y = tf.cast(features['position_y'], tf.int32)        
        
-        return image, angle, angle_ok, position_x, position_y
+        return im, angle, angle_ok, position_x, position_y
             
     
-    def _distort_inputs(self,  image):
+    def _distort_inputs(self,  im):
         """
         Don't flip orientation images
         """ 
-        image = tf.image.random_brightness(image, max_delta=63)
-        image = tf.image.random_contrast(image, lower=0.2, upper=1.8)
+        im = tf.image.random_brightness(im, max_delta=63)
+        im = tf.image.random_contrast(im, lower=0.2, upper=1.8)
         
-        return image
+        return im
 
 
-    def train(self, Nepoch):
+    def train(self, Nepoch, lmbda=5e-4):
         """
         """
         model_fname = os.path.join(self.model_dir, 'CAM')
@@ -151,21 +158,27 @@ class TrainModel:
                 
         valid_X,  valid_y = [],  []
         
-        model = Model(Nclass=self.Nclass, im_w=self.im_w, im_h=self.im_h)
+        model = Model(Nclass=self.Nclass, im_w=self.im_w, im_h=self.im_h, lmbda=lmbda)
         
         print('Starting training for %d epochs.' % Nepoch)
         with model.graph.as_default():
             # Input images and labels.
-            images, angles, angles_ok, _, _ = self.get_inputs(train_fname, Nepoch, Ntrain, train=True)
+            images, angles, angles_ok, _, _ = self.get_inputs(train_fname,
+                                                              Nepoch,
+                                                              Ntrain,
+                                                              train=True)
             valid_images, valid_angles, valid_angles_ok, _, _ = self.get_inputs(valid_fname, 1, Nvalid, train=False, batch_sz=valid_batch_sz)
-
+            optimizer = tf.train.AdamOptimizer(learning_rate).minimize(model.loss) 
+            
             with tf.Session(graph=model.graph) as session:
-                optimizer = tf.train.AdamOptimizer(learning_rate).minimize(model.loss) 
+                                
                 session.run(tf.initialize_all_variables())
+                session.run(tf.initialize_local_variables())
+                
                 # Start input enqueue threads
                 coord = tf.train.Coordinator()
                 threads = tf.train.start_queue_runners(sess=session,  coord=coord)  
-      
+
                 validation_accuracy = []
                 train_accuracy = [] 
 
@@ -238,7 +251,7 @@ class TrainModel:
           
 class Model:
     
-    def __init__(self, Nclass, im_w, im_h):
+    def __init__(self, Nclass, im_w, im_h, lmbda=5e-4):
         
         self.Nclass = Nclass
         self.im_w = im_w
@@ -276,14 +289,15 @@ class Model:
             
             weights = filter(lambda x: x.name.endswith('W:0'), tf.trainable_variables())
             regularizer = tf.reduce_sum(tf.pack([tf.nn.l2_loss(x) for x in weights]))
-            self.loss += regularizer * 5e-4
+            #self.loss += (regularizer * 5e-4)
+            self.loss += (regularizer * lmbda)
             
             correct = tf.equal(tf.argmax(self.logits, 1), tf.cast(self.y_,  tf.int64))
             self.accuracy = tf.reduce_mean(tf.cast(correct, tf.float32)) * 100.
             
             # CAM
             top_conv_resz = tf.image.resize_bilinear(self.top_conv,
-                                                        [self.im_h, self.im_w])
+                                                     [self.im_h, self.im_w])
             label_w = tf.gather(tf.transpose(gap_w), tf.cast(self.y_, tf.int32))
             label_w = tf.reshape(label_w, [-1, 1024, 1])
             top_conv_resz = tf.reshape(top_conv_resz,
@@ -326,7 +340,7 @@ class HeadTracker:
         
                 
     def track2video(self, in_fname, out_fname, log_fname=None,
-                    t_start=0.0, t_end=-1, dur=None):
+                    t_start=0.0, t_end=-1, dur=None, verbose=True):
         """
         t_start  : only used if no log_fname is provided
         t_end  : only used if no log_fname is provided
@@ -334,7 +348,7 @@ class HeadTracker:
         """
         if not tf.gfile.Exists(in_fname):
             raise ValueError('Failed to find file: %s' % in_fname)
-                        
+
         fst = FrameStepper(in_fname)
         fps = int(round(1/fst.dt))
         FFMpegWriter = manimation.writers['ffmpeg']
@@ -357,22 +371,23 @@ class HeadTracker:
             raise ValueError('t_end cannot be later %1.3f (time of the last frame)' %
                              fst.duration)
                              
-
         if not log_fname is None:
             if not tf.gfile.Exists(log_fname):
                 raise ValueError('Failed to find file: %s' % log_fname)
             else:
                 log_data, log_header = read_log_data(log_fname)
                 Nframe = len(log_data)
+                
+                if verbose:
+                    # Counter printed on command line
+                    cdp = CountdownPrinter(Nframe)
+            
                 with writer.saving(fig, out_fname, dpi):
                     for i, dat in enumerate(log_data):
-                        # Counter printed on the command line
-                        sys.stdout.flush()
-                        s = '%04d' % (Nframe - i)
-                        sys.stdout.write(s)
-                        sys.stdout.flush()
-                        sys.stdout.write('\b'*len(s))
                         
+                        if verbose:
+                            cdp.print(i)
+
                         fst.read_t(dat['frame_time'])
                         true_pos = {'x': dat['center_x'], 'y': dat['center_y']}
                         if dat['angle_ok']:
@@ -385,32 +400,29 @@ class HeadTracker:
                         fig.clf()                        
         else:
         
-            Nframe = int(((t_end - t_start) / fst.dt))
+            Nframe = int(np.ceil((t_end - t_start) / fst.dt))
+            if verbose:
+                # Counter printed on command line
+                cdp = CountdownPrinter(Nframe)            
             
             with writer.saving(fig, out_fname, dpi):
-                fst.read_t(t_start)
+                ok = fst.read_t(t_start)
                 i = 0
-                while fst.t < t_end: 
-                    # Counter printed on the command line
-                    sys.stdout.flush()
-                    s = '%04d' % (Nframe - i)
-                    sys.stdout.write(s)
-                    sys.stdout.flush()
-                    sys.stdout.write('\b'*len(s))
+                while (fst.t < t_end) and ok: 
+                    
+                    if verbose:
+                        cdp.print(i)
     
                     self.plot(fst.frame, true_pos=None, fig=fig, verbose=False)
                     writer.grab_frame()
                     fig.clf()
-                    i += 1
-                    try:
-                        fst.next()
-                    except:
-                        ipdb.set_trace()
+                    ok = fst.next()
+                    i += ok
 
         fst.close() 
 
 
-    def track2fig(self, in_fname, out_fname, log_data):
+    def track2fig(self, in_fname, out_fname, log_data, verbose=True):
         """
         """
         if not tf.gfile.Exists(in_fname):
@@ -420,13 +432,14 @@ class HeadTracker:
         #figsize=figsize, dpi=dpi
         fig = plt.figure()
         Nframe = len(log_data)
+        if verbose:
+            # Counter printed on command line
+            cdp = CountdownPrinter(Nframe)            
+            
         for i, dat in enumerate(log_data):
-            # Counter printed on the command line
-            sys.stdout.flush()
-            s = '%04d' % (Nframe - i)
-            sys.stdout.write(s)
-            sys.stdout.flush()
-            sys.stdout.write('\b'*len(s))
+
+            if verbose:
+                cdp.print(i)
             
             print(i, dat['frame_time'])
             fst.read_t(dat['frame_time'])
@@ -435,21 +448,22 @@ class HeadTracker:
                 true_angle = (180 * (dat['angle'] / np.pi)).round()
             else:
                 true_angle = None
+
             self.plot(fst.frame, true_pos=true_pos, 
                       true_angle=true_angle, fig=fig, verbose=False)
-            fig.savefig(out_fname + '_' + s + '.svg')
-            fig.savefig(out_fname + '_' + s + '.png')
+            fig.savefig('%s_%03d.svg' % (out_fname, i))
+            fig.savefig('%s_%03d.png' % (out_fname, i))
             fig.clf()
 
         fst.close()   
                 
                 
-    def track(self, video_fname, t_start=0.0, t_end=-1, dur=None):
+    def track(self, video_fname, t_start=0.0, t_end=-1, dur=None, verbose=True):
         """
         """
         if not tf.gfile.Exists(video_fname):
             raise ValueError('Failed to find file: %s' % video_fname)
-            
+        
         fst = FrameStepper(video_fname)
         
         if t_start < 0:
@@ -462,30 +476,31 @@ class HeadTracker:
             raise ValueError('t_end cannot be later %1.3f (time of the last frame)' %
                              fst.duration)
         
-        Nframe = int(((t_end - t_start) / fst.dt))
+        Nframe = int(np.ceil((t_end - t_start) / fst.dt))
+        
+        if verbose:
+            cdp = CountdownPrinter(Nframe)
 
-        est_track = np.recarray(shape=Nframe,
+        est_track = np.recarray(shape=Nframe+1,
                                 dtype=[('t',  float), ('x',  float),
                                        ('y',  float), ('angle',  float),
                                        ('angle_w', float)])        
-
-        if Nframe > fst.tot_n:
-            raise ValueError('Nframes cannot be greater than the number of frames video.')
         
         i = 0
-        fst.read_t(t_start)
-        while fst.t < t_end:
+        ok = fst.read_t(t_start)
+        while (fst.t < t_end) and ok:
+            if verbose:
+                cdp.print(i)
             x,  y, angle, angle_w, _ = self.predict(fst.frame, verbose=False)
             est_track[i].x = x
             est_track[i].y = y
             est_track[i].angle = angle
             est_track[i].angle_w = angle_w            
             est_track[i].t = fst.t
-            i += 1
-            try:
-                fst.next()
-            except:
-                ipdb.set_trace()
+            ok = fst.next()
+            i += ok
+            
+        est_track = est_track[:i]
             
         fst.close()
             
@@ -518,16 +533,16 @@ class HeadTracker:
                                        ('angle_w', float)])
         true_track = np.recarray(shape=Nframe,
                                  dtype=[('t',  float), ('x',  float),
-                                        ('y',  float), ('angle',  float),
-                                        ('angle_ok', int)])
+                                        ('y',  float), ('angle',  float)])
+                          
+
+        if verbose:
+            cdp = CountdownPrinter(Nframe)
                           
         for i, dat in enumerate(log_data[:Nframe]):
-
-            sys.stdout.flush()
-            s = '%04d' % (Nframe - i)
-            sys.stdout.write(s)
-            sys.stdout.flush()
-            sys.stdout.write('\b'*len(s))
+            
+            if verbose:
+                cdp.print(i)
             # Read the frame
             fst.read_t(dat['frame_time'])
             
