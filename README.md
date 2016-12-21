@@ -1,4 +1,5 @@
 # head-tracker
+Head and gaze tracking of unrestrained marmosets using deep neural networks
 
 ## What it is
 Current sophisticated technologies for manipulating and recording the nervous system allow us to perform historically unprecedented experiments. However, any influences of our experimental manipulations might have on psychological processes must be inferred from their effects on behavior. Today, quantifying behavior has become the bottleneck for large-scale, high throughput, experiments.
