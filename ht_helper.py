@@ -9,7 +9,111 @@ import sys
 from video_tools import VideoReader
 from scipy.interpolate import UnivariateSpline
 from scipy.ndimage.filters import gaussian_filter1d
+from sklearn.metrics import roc_auc_score, matthews_corrcoef, brier_score_loss
 
+import ipdb
+
+
+def circmedian(angs, units='deg'):
+    """
+    From: https://github.com/scipy/scipy/issues/6644
+    """    
+    
+    if units == 'deg':
+        angs = np.deg2rad(angs)
+        
+    pdists = angs[np.newaxis, :] - angs[:, np.newaxis]
+    pdists = (pdists + np.pi) % (2 * np.pi) - np.pi
+    pdists = np.abs(pdists).sum(1)
+    
+    if units == 'deg':
+        return np.rad2deg(angs[np.argmin(pdists)])
+    else:
+        return angs[np.argmin(pdists)]
+
+
+def get_error_OLD(est_track, true_track):
+    """
+    """
+    
+    if est_track.ndim > 1:
+        true_track = true_track.reshape((true_track.shape[0],1))
+    
+    error = np.recarray(shape=est_track.shape,
+                        dtype=[('position', float),
+                               ('orientation', float),
+                               ('orientation_weighted', float)])
+    
+    # Position error
+    pos_err = (true_track.x - est_track.x)**2 + (true_track.y - est_track.y)**2
+    error.position = np.sqrt(pos_err)
+    
+    # Orientation error
+    error.orientation = anglediff(true_track.angle, est_track.angle, units='deg')    
+    error.orientation_weighted = anglediff(true_track.angle, est_track.angle_w, units='deg')
+    # no angle
+    true_angle_not_ok = np.isnan(true_track.angle)
+    est_angle_not_ok = np.isnan(est_track.angle)
+    agree = np.logical_and(true_angle_not_ok, est_angle_not_ok)
+    disagree = np.logical_xor(true_angle_not_ok, est_angle_not_ok)
+    error.orientation[agree] = 0.  # if both true orientation and predicted orientation not ok -> error zero
+    error.orientation_weighted[agree] = 0.
+    error.orientation[disagree] = 180. # a missclassification of whether head orientation is discernible is considered 180 degree error.
+    error.orientation_weighted[disagree] = 180. 
+
+    return error     
+
+    
+def get_error(est_track, true_track):
+    """
+    """
+    
+    if est_track.ndim > 1:
+        true_track = true_track.reshape((true_track.shape[0],1))
+    
+    error = np.recarray(shape=est_track.shape,
+                        dtype=[('position', float),
+                               ('orientation', float),
+                               ('orientation_weighted', float)])
+    
+    # Position error
+    pos_err = (true_track.x - est_track.x)**2 + (true_track.y - est_track.y)**2
+    error.position = np.sqrt(pos_err)
+    
+    # Orientation error
+    error.orientation = anglediff(true_track.angle, est_track.angle, units='deg')    
+    error.orientation_weighted = anglediff(true_track.angle, est_track.angle_w, units='deg')
+    
+    descr = {}
+    bix = np.logical_not(np.isnan(error.orientation))
+    descr['orientation_median'] = np.median(np.abs(error.orientation[bix]))
+    descr['orientation_mean'] = np.mean(np.abs(error.orientation[bix]))
+    bix = np.logical_not(np.isnan(error.orientation_weighted))
+    descr['orientation_weighted_median'] = np.nanmedian(np.abs(error.orientation_weighted[bix]))
+    descr['orientation_weighted_mean'] = np.nanmean(np.abs(error.orientation_weighted[bix]))
+    # no angle
+    true_no_angle = np.isnan(true_track.angle)
+    est_no_angle = np.isnan(est_track.angle)
+    agree = np.logical_and(true_no_angle, est_no_angle)
+    disagree = np.logical_xor(true_no_angle, est_no_angle)
+    both = np.logical_or(true_no_angle, est_no_angle)
+    #ipdb.set_trace()
+    descr['no_angle_auc'] = roc_auc_score(true_no_angle, est_no_angle)
+    descr['no_angle_mcc'] = matthews_corrcoef(true_no_angle, est_no_angle)
+    descr['no_angle_brier'] = brier_score_loss(true_no_angle, est_no_angle)    
+    descr['no_angle_acc'] = agree.sum()/both.sum()
+    descr['no_angle_p_per_frame'] = disagree.sum()/disagree.shape[0]
+    descr['position_median'] = np.median(error.position)
+    descr['position_mean'] = np.mean(error.position)
+    
+    #print('True frequency of angle-does-not-apply:',
+     #     true_no_angle.sum()/true_no_angle.shape[0])
+    
+    #print('Estimated frequency of angle-does-not-apply:',
+     #     est_no_angle.sum()/est_no_angle.shape[0])    
+
+    return error, descr
+    
 
 def contiguous_regions(b, minlen=1):
     """
@@ -47,9 +151,12 @@ def contiguous_regions(b, minlen=1):
     # Reshape the result into two columns
     idx.shape = (-1, 2)
     # Remove indeci for contigous regions shorter than minlen
-    bix = (np.diff(idx) >= minlen).flatten()
-
-    return idx[bix]
+    bix = (np.diff(idx) >= (minlen - 1)).flatten()
+    # shift the end indecei to refer to the last position in the regions
+    # otherwise the region length for regions what run until the end of "b" 
+    # would be counted as 1 element shorter than those fully within "b"
+    idx[:, 1] -= 1
+    return idx[bix]    
     
     
 def smooth(y, sigma, axis=-1, interpolation='spline'):
@@ -57,6 +164,13 @@ def smooth(y, sigma, axis=-1, interpolation='spline'):
     Does spline interpolation of missing values (NaNs) before gaussian smoothing.
     """
     
+    if axis == -1:
+        axis = y.ndim - 1
+    elif axis == 0 or axis == 1:
+        pass
+    else:
+        raise ValueError('axis has to be 0, 1 or -1')
+        
     y = y.copy()
     x = np.arange(y.shape[axis])    
 
@@ -67,54 +181,54 @@ def smooth(y, sigma, axis=-1, interpolation='spline'):
             
             if interpolation == 'spline':
                 y[w] = 0.
-                spl = UnivariateSpline(x, y, w=~w, k=3)
+                spl = UnivariateSpline(x, y, w=np.logical_not(w), k=3)
                 y[w] = spl(x[w])
             elif interpolation == 'linear':
-                cregs = contiguous_regions(w, minlen=1)
+                cregs = contiguous_regions(w, minlen=0)
                 for cr in cregs:
                     if cr[0] > 0:
                         y0 = y[cr[0]-1]
-                    else:
-                        y0 = y[cr[1]+1]
-                    
-                    if cr[1] < y.shape[0]:
-                        y1 = y[cr[1]]
-                    else:
-                        y1 = y[cr[0]-1]
-                    y[cr[0]: cr[1]] = np.linspace(y0, y1, cr[1]-cr[0]+2)[1:-1]
+                        
+                        if cr[1] < y.shape[axis]-1:
+                            y1 = y[cr[1]+1]
+                            ynew = np.linspace(y0, y1, cr[1]+1-cr[0]+2, endpoint=True)
+                            y[cr[0]: cr[1]+1] = ynew[1:-1]                            
+
+                        else:  # cr[1] is last value
+                            y[cr[0]:] = y0                            
+                    else: # cr[0] is first value
+                        y[:cr[1]+1] = y[cr[1]+1]
 
     elif y.ndim == 2:
-
+        
         if axis == 0:
             y = y.T
-        else:
-            axis = 1
-                
+                    
         for i in range(y.shape[0]):
             w = np.isnan(y[i])
             if w.any():
                 if interpolation == 'spline':
                     y[i, w] = 0.
-                    spl = UnivariateSpline(x, y[i], w=(~w).astype(int), k=3)
+                    spl = UnivariateSpline(x, y[i], w=(np.logical_not(w)).astype(int), k=3)
                     y[i, w] = spl(x[w])
                 elif interpolation == 'linear':
-                    cregs = contiguous_regions(w, minlen=1)
+                    cregs = contiguous_regions(w, minlen=0)
                     for cr in cregs:
                         if cr[0] > 0:
                             y0 = y[i, cr[0]-1]
-                        else:
-                            y0 = y[i, cr[1]+1]
-                        
-                        if cr[1] < y.shape[0]:
-                            y1 = y[i, cr[1]]
-                        else:
-                            y1 = y[i, cr[0]-1]
-                        y[i, cr[0]: cr[1]] = np.linspace(y0, y1, cr[1]-cr[0]+2)[1:-1]                    
+                            
+                            if cr[1] < y.shape[1]-1:
+                                y1 = y[i, cr[1]+1]
+                                ynew = np.linspace(y0, y1, cr[1]+1-cr[0]+2, endpoint=True)
+                                y[i, cr[0]: cr[1]+1] = ynew[1:-1]
+                            else:  # cr[1] is last value
+                                y[i, cr[0]:] = y0                            
+                        else: # cr[0] is first value
+                            y[i, :cr[1]+1] = y[i, cr[1]+1]
 
     else:
-        raise ValueError('Only 1 or 2 dimensional input arrays are supported.')                                
-                                                
-    
+        raise ValueError('Only 1 or 2 dimensional input arrays are supported.')
+                                                    
     return gaussian_filter1d(y, sigma, axis=axis)
 
 
@@ -393,9 +507,13 @@ def get_max_gaze_line(angle, x, y, im_w, im_h, margin=10, units='deg'):
     else:
         dy = y - margin
     
-    # Chose the shortest radius since the longest will go outside of 
-    # im
-    r = min(np.abs(dx/np.cos(angle)), np.abs(dy/np.sin(angle)))
+    # Chose the shortest radius since the longest will go outside of im
+    if np.cos(angle) == 0:
+        r = dy
+    elif np.sin(angle) == 0:
+        r = dx
+    else:
+        r = min(np.abs(dx/np.cos(angle)), np.abs(dy/np.sin(angle)))
 
     x1 = r * np.cos(angle) + x
     y1 = r * np.sin(angle) + y
@@ -444,21 +562,32 @@ def anglediff(angles0, angles1, units='deg'):
     return adiff
         
     
-def angles2complex(angles):   
+def angles2complex(angles, units='deg'):
     """ 
     Angles in degrees, array or scalar
     """ 
-    z = np.cos(np.deg2rad(angles)) + np.sin(np.deg2rad(angles))*1j
-    
+    if units == 'deg':
+        z = np.cos(np.deg2rad(angles)) + np.sin(np.deg2rad(angles))*1j
+    elif units == 'rad':
+        z = np.cos(angles) + np.sin(angles)*1j
+    else:
+        raise ValueError('"units" has to be "rad" or "deg"') 
+        
     return z
     
 
-def complex2angles(z):   
+def complex2angles(z, units='deg'):   
     """ 
     z complex array or scalar 
     angles in degrees, array or scalar
     """ 
-    angles = np.rad2deg(np.arctan2(z.imag, z.real))
+    if units == 'deg':    
+        angles = np.rad2deg(np.arctan2(z.imag, z.real))
+    elif units == 'rad':
+        angles = np.arctan2(z.imag, z.real)
+    else:
+        raise ValueError('"units" has to be "rad" or "deg"')         
+        
     return angles
     
     
@@ -511,17 +640,43 @@ def angle2class(angles, Nclass, angles_ok=None, units='deg'):
             y[y == Nclass] = 0
             # No clear head orientation in the horiz plane,
             # ie angle_ok = 0, is coded as the last class.
-            y[~ angles_ok] = Nclass - 1
+            y[np.logical_not(angles_ok)] = Nclass - 1
         
     return np.float32(y)
     
     
-def class2angle(y,  Nclass):
+def circmean_weighted(angles, w, axis=0, units='deg'):
+    
+    if units == 'deg':
+        angles = np.deg2rad(angles)
+    elif units == 'rad':
+        pass
+    else:
+        raise ValueError('"units" has to be "rad" or "deg"')
+        
+    s = np.nansum(np.sin(angles) * w, axis=axis)
+    c = np.nansum(np.cos(angles) * w, axis=axis)
+    
+    wmean = np.arctan2(s, c)
+    
+    if units == 'deg':
+        wmean = np.rad2deg(wmean)
+    
+    return wmean
+    
+    
+def class2angle(y,  Nclass, units='deg'):
     """
     Angles are from -180 to 180
     y run from 0 to Nclass-1
     """
-    angles = y * (360 / Nclass) + 180 / Nclass # angles run from -180:180
+    if units == 'deg':
+        angles = y * (360 / Nclass) + 180 / Nclass # angles run from -180:180
+    elif units == 'rad':
+        angles = y * (np.pi / Nclass) + np.pi / (2 * Nclass) # angles run from -180:180
+    else:
+        raise ValueError('"units" has to be "rad" or "deg"')         
+        
     return angles - 180
     
    

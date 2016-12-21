@@ -7,7 +7,7 @@ Created on Sat Jul 30 15:20:09 2016
 import tensorflow as tf
 from ht_helper import HeSD, angle2class, FrameStepper, class2angle, whiten
 from ht_helper import anglediff, get_max_gaze_line, CountdownPrinter
-from ht_helper import angles2complex, complex2angles, softmax
+from ht_helper import angles2complex, complex2angles, softmax, get_error
 from data_preparation import read_log_data
 import numpy as np
 import re
@@ -30,14 +30,14 @@ class TrainModel:
         self.data_dir = data_dir.rstrip('/')            
 
         if not os.path.isdir(data_dir):
-            raise ValueError('data_dir %s\nis not a directory.' %
+            raise FileNotFoundError('data_dir %s\nis not a directory.' %
                              self.data_dir)
         if model_dir is None:
             model_dir = '/home/hjalmar/head_tracker/model/CAM/BIG'
         self.model_dir = model_dir.rstrip('/')
         
         if not os.path.isdir(model_dir):
-            raise ValueError('model_dir %s\nis not a directory.' %
+            raise FileNotFoundError('model_dir %s\nis not a directory.' %
                              self.model_dir)
         
         self.Nclass = Nclass
@@ -49,8 +49,8 @@ class TrainModel:
         """
         Nex_per_epoch  - Ntrain or Nvalid: number_of_examples_per_epoch
         """
-        if not tf.gfile.Exists(fname):
-            raise ValueError('Failed to find file: %s' % fname)
+        if not os.path.isfile(fname):
+            raise FileNotFoundError('Failed to find file: %s' % fname)
         
         if batch_sz is None:
             batch_sz = self.batch_sz
@@ -565,27 +565,12 @@ class HeadTracker:
             est_track[i].y = y
             est_track[i].angle = angle
             est_track[i].angle_w = angle_w
-                       
-        error = np.recarray(shape=Nframe,  dtype=[('position', float),
-                                                  ('orientation', float),
-                                                  ('orientation_weighted', float)])
-
-        e = (true_track.x - est_track.x)**2 + (true_track.y - est_track.y)**2
-        error.position = np.sqrt(e)
-        error.orientation = anglediff(true_track.angle, est_track.angle, units='deg')
-        error.orientation_weighted = anglediff(true_track.angle, est_track.angle_w, units='deg')
-        est_angle_not_ok = np.isnan(est_track.angle)
-        true_angle_not_ok = np.isnan(true_track.angle)
-        ok = np.logical_and(true_angle_not_ok, est_angle_not_ok)
-        not_ok = np.logical_xor(true_angle_not_ok, est_angle_not_ok)
-        error.orientation[ok] = 0.0  # if both true orientation and predicted orientation not ok -> error zero
-        error.orientation_weighted[ok] = 0.0
-        error.orientation[not_ok] = 180. # a missclassification of whether head orientation is discernible is considered 180 degree error.
-        error.orientation_weighted[not_ok] = 180.
-            
+                                   
         fst.close()
+        
+        error, error_desrc = get_error(est_track, true_track)
 
-        return est_track,  true_track,  error            
+        return est_track, true_track, error, error_desrc
             
         
     def predict(self, frame, verbose=True):
@@ -616,7 +601,7 @@ class HeadTracker:
                                            feed_dict={self.model.X: im}))
         label = p.argmax()
         angles = class2angle(np.arange(self.Nclass-1), self.Nclass-1)
-        # Use theSoftmax output, p, as weights for a weighted average.
+        # Use the Softmax output, p, as weights for a weighted average.
         p = (p[0, :-1] / p[0, :-1].sum()).flatten()
         z_w = (angles2complex(angles) * p).sum()
         angle_w = complex2angles(z_w)
@@ -738,6 +723,8 @@ class HeadTracker:
     def close(self):
         """
         """
-        
-        if hasattr(self, 'model.session'):
-            self.model.session.close()
+
+        if hasattr(self, 'model'):
+            if hasattr(self.model, 'session'):
+                self.model.session.close()
+       
