@@ -1,5 +1,7 @@
 # head-tracker
-Head and gaze tracking of unrestrained marmosets using deep neural networks
+Head and gaze tracking of unrestrained marmosets using deep neural networks.
+This repository contains the implementation of the method described in [Head and gaze tracking of unrestrained marmosets.](http://biorxiv.org/content/early/2016/12/29/079566)
+by Turesson, Ribeiro Conceicao and Ribeiro.
 
 ## What it is
 Current sophisticated technologies for manipulating and recording the nervous system allow us to perform historically unprecedented experiments. However, any influences of our experimental manipulations might have on psychological processes must be inferred from their effects on behavior. Today, quantifying behavior has become the bottleneck for large-scale, high throughput, experiments.
@@ -11,7 +13,7 @@ Current sophisticated technologies for manipulating and recording the nervous sy
 Given a video of a marmoset, filmed from above, the head is localized and its orientation in the horizontal plane is estimated. The common marmoset has a relatively small and light head and thus low inertial weight, this means that they rely more on head movements to direct their gaze than to larger primates, such as macaques and humans. Thus, knowing the head orientation tells us more the gaze direction than it would in humans who direct their gaze much more with saccades (eye movements independent of the head). That is, these routines to estimate where the subject is and roughly where it is looking using only a webcam.
 
 ## How it works
-Video frames are scaled down from 480 x 640 pixels to 76 x 102 pixels. 
+Video frames are scaled down from 480 x 640 pixels to 76 x 102 pixels.
 
 The head is localized in two steps. First, the head is localized to a 52 x 52 pixel sub-region of through dividing up the 76 x 102 frame into 12, 50% overlapping, 48x48 pixel windows. The weighted average position (weighted by softmax output) is used as a center of the 52 x 52 sub-region. In the second step, a 32 x 32 pixed window is slid over the sub-region in steps of 2 pixels (i.e. 94% overlap) and the weighted average position is taken as the final position estimate.
 
