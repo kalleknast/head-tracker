@@ -475,47 +475,9 @@ def convert_to_tfrecords(images, angles, angles_ok, positions, fname):
         writer.write(example.SerializeToString())
         
     writer.close()    
-    
-
-#def to_record(image, label, angle, position_x, position_y):
-#    """
-#    Image and label to record
-#
-#    From:
-#    https://github.com/tensorflow/tensorflow/blob/master/tensorflow/examples/how_tos/reading_data/convert_to_records.py
-#    """
-#    
-#    def _int64_feature(value):
-#        return tf.train.Feature(int64_list=tf.train.Int64List(value=[value]))
-#    
-#    def _bytes_feature(value):
-#        return tf.train.Feature(bytes_list=tf.train.BytesList(value=[value])) 
-#    
-#    # From whitened float image to uint8
-#    image -= image.min()
-#    image /= image.max()
-#    image *= 255   
-#    image = np.uint8(image)    
-#    
-#    n_row = image.shape[0]
-#    n_col = image.shape[1]
-#    image = image.reshape([n_row,  n_col,  1])    
-#    depth = image.shape[2]    
-#        
-#    example = tf.train.Example(features=tf.train.Features(feature={
-#            'height': _int64_feature(n_row),
-#            'width': _int64_feature(n_col),
-#            'depth': _int64_feature(depth),
-#            'label': _int64_feature(int(label)),
-#            'angle': _int64_feature(int(angle)),
-#            'position_x': _int64_feature(int(position_x)),
-#            'position_y': _int64_feature(int(position_y)),
-#            'image_raw': _bytes_feature(image.tostring())}))
-#    
-#    return example.SerializeToString()
 
 
-def labeledData2storage_CAM(log_dir, video_dir, data_dir, Ntrain=None, Ndev=3000):
+def labeledDataToStorage(log_dir, video_dir, data_dir, Ntrain=None, Ndev=3000):
     """
     Trying to maximize resolution while minimizing the number of windows/patches
     to classify per video fram using a Multi Resolution Pyramid.

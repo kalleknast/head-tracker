@@ -1,77 +1,77 @@
 # head-tracker
-Head and gaze tracking of unrestrained marmosets using deep neural networks.
-This repository contains the implementation of the method described in [Head and gaze tracking of unrestrained marmosets.](http://biorxiv.org/content/early/2016/12/29/079566)
-by Turesson, Ribeiro Conceicao and Ribeiro.
+Head and gaze tracking of unrestrained marmosets using a convolutional neural network.
+This repository contains the implementation of the method described in [Head and gaze tracking of unrestrained marmosets](http://biorxiv.org/content/early/2016/12/29/079566)
+by Turesson, Ribeiro Conceicao and Ribeiro (2016).
 
 ## What it is
 Current sophisticated technologies for manipulating and recording the nervous system allow us to perform historically unprecedented experiments. However, any influences of our experimental manipulations might have on psychological processes must be inferred from their effects on behavior. Today, quantifying behavior has become the bottleneck for large-scale, high throughput, experiments.
 
-**head-tracker** try to solve this issue through using modern deep learning algorithms for video based animal tracking. It provides methods for tracking head position and orientation (i.e. indirectly gaze) from simple video recordings of the common marmoset (*Callithrix jacchus*).
+With **head-tracker** we try to solve this issue by using a modern deep learning algorithm for video-based animal tracking. **head-tracker** provides methods for tracking head position and direction (i.e. indirectly gaze) from simple video recordings of the common marmoset (*Callithrix jacchus*).
 
 ## What it does
 
-Given a video of a marmoset, filmed from above, the head is localized and its orientation in the horizontal plane is estimated. The common marmoset has a relatively small and light head and thus low inertial weight, this means that they rely more on head movements to direct their gaze than to larger primates, such as macaques and humans. Thus, knowing the head orientation tells us more the gaze direction than it would in humans who direct their gaze much more with saccades (eye movements independent of the head). That is, these routines to estimate where the subject is and roughly where it is looking using only a webcam.
+The routines in this repository allows researchers to estimate where a subject is and roughly where it is looking using only a webcam. Given a video of a marmoset, filmed from above, the head is localized and its direction in the horizontal plane is estimated. The common marmoset has a relatively small and light head and thus low inertial weight, which means that they rely more on head movements to direct their gaze than to larger primates, such as macaques and humans. Thus, the head direction give a much better estimate of the gaze than it would, for example, in humans who direct their gaze much more with head-independent eye movements.
 
 ## How it works
-Video frames are scaled down from 480 x 640 pixels to 76 x 102 pixels.
+To generate the training data, video frames are manually labeled with head direction.
 
-The head is localized in two steps. First, the head is localized to a 52 x 52 pixel sub-region of through dividing up the 76 x 102 frame into 12, 50% overlapping, 48x48 pixel windows. The weighted average position (weighted by softmax output) is used as a center of the 52 x 52 sub-region. In the second step, a 32 x 32 pixed window is slid over the sub-region in steps of 2 pixels (i.e. 94% overlap) and the weighted average position is taken as the final position estimate.
+Video frames are resized (480 x 640 to 160 x 120 pixels) and whitened.
 
-Given a position estimate the head orientation is estimated as the weighted average of 10, 40 x 40 windows located with random offsets in the range -10 to 10 pixels on the position estimate. Orientations are binned into 12 directions spanning 0-360&deg; (i.e. in bins of  30&deg;).
+The network is a CNN with six convolutional layers and two max pool layers. Filter sizes in the convolutional layers decrease from 11 × 11 to 3 × 3. The final layer is a global average pooling layer from where head position is read out from a class activity map (see: [Learning Deep Features for Discriminative Localization](http://www.cv-foundation.org/openaccess/content_cvpr_2016/html/Zhou_Learning_Deep_Features_CVPR_2016_paper.html)). This global average pooling layer has a size of 1024 and is connected to a softmax output layer. We optimized the cross-entropy loss regularized by the Euclidean (L2) norm of the weights set to 0.0001.
 
 ## Example usage
 
-####Label training data
+#### Label training data
 
 ```python
-from data_preparation import LabelFrames
-video_fname = '/full/path/to/some/video/file.mkv'
-lf = LabelFrames(video_fname)
+import data_preparation as dp
+video_fname = '/path/to/some/video/file.mkv' # doesn't have to be .mkv
+lf = dp.LabelFrames(video_fname)
 
 lf.run_batch(t0=2.3)   # time of 1st frame to label in seconds
 ```
 
-####Extract training data and store in tfrecords format
+#### Extract training data and store in tfrecords format
 
 ```python
-log_dir = '/directory/where/log/files/are/stored/'
-video_dir = '/directory/where/video/files/are/stored/'
-out_base_fname = 'name'  # TODO names will be like this...
-out_dir = '/directory/where/training/and/dev/data/will/be/stored'
+log_dir = '/path/to/log/files/'
+video_dir = '/path/to/video/files/'
+out_dir = '/path/to/directory/where/training/and/dev/data/will/be/stored'
 
-labeledData2storage_mrp(log_dir, video_dir, out_base_fname, out_dir)
+dp.labeledDataToStorage(log_dir, video_dir, data_dir, Ndev=3000)
 ```
 
-#### Train the position model
+#### Train the model
 ```python
+from head_tracker import TrainModel
 data_dir = '/path/to/directory/containing/tfrecords'
 model_dir = '/path/to/directory/where/models/will/be/saved'
-from head_tracker import TrainPositionModel
-tpm = TrainPositionModel(data_dir=data_dir,
-						 model_dir=model_dir)
-tpm.train(level=1,Nepoch=100)
+Nepoch = 80
+Nclass = 29
+tm = TrainModel(Nclass=Nclass,  data_dir=data_dir,  model_dir=model_dir)
+valid_acc, train_acc = tm.train(Nepoch) # Train for Nepoch iterations over the traing data.
 ```
-Wait a couple of hours.
+Be patient.
 
-#### Train the orientation model
-```python
-from head_tracker import TrainOrientationModel
-tom = TrainOrientationModel(Nclass=12)
-tom.train(Nepoch=50)
-```
-Wait a bit more.
 
 #### Test tracking performance
 ```python
 from head_tracker import HeadTracker
-log_dir = '/directory/where/log/files/are/stored/'
-video_dir = '/directory/where/video/files/are/stored/'
-ht = HeadTracker()
-est_track,  true_track,  error = ht.test_track_head(log_fname, video_dir, Nframe=1000)
-ht.track2video(in_fname, out_fname, est_track)
+log_fname = '/path/to/log/file.txt'
+video_dir = '/path/to/video/files/'
+video_fname = '/path/to/video/file.mkv' # doesn't have to be .mkv
+video_save_fname = '/path/to/annotated/video.mp4'
+ht = HeadTracker(Nclass=Nclass, model_dir=model_dir)
+est_track, true_track, error = ht.test_track(log_fname, video_dir)
+# write a video annotated with head direction and position.
+ht.track2video(video_fname, video_save_fname, est_track)
+ht.close()
 ```
 Watch the resulting video.
 
 ## Performance
-TODO
+A subset of the video frames were annotated by two investigators. We use the disagreement between the two invesigators as a reference for the model's performance.
+The mean head direction error was 10.9&deg; (median error 6.2&deg;), which is very close to the inter-human disagreement with a mean of 9.2&deg; (median 7.2&deg;). The mean position error was 33 pixels (median 23 pixels), compared to the inter-human
+disagreement with a mean of 10 pixels (median 9 pixels).
 
+<img src="https://github.com/kalleknast/head-tracker/Fig2.png" width="400" />

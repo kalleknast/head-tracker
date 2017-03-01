@@ -11,8 +11,6 @@ from scipy.interpolate import UnivariateSpline
 from scipy.ndimage.filters import gaussian_filter1d
 from sklearn.metrics import roc_auc_score, matthews_corrcoef, brier_score_loss
 
-import ipdb
-
 
 def circmedian(angs, units='deg'):
     """
@@ -162,6 +160,8 @@ def contiguous_regions(b, minlen=1):
 def smooth(y, sigma, axis=-1, interpolation='spline'):
     """
     Does spline interpolation of missing values (NaNs) before gaussian smoothing.
+    
+    interpolattion   -- "spline" | "linear"
     """
     
     if axis == -1:
