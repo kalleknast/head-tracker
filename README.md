@@ -74,4 +74,4 @@ A subset of the video frames were annotated by two investigators. We use the dis
 The mean head direction error was 10.9&deg; (median error 6.2&deg;), which is very close to the inter-human disagreement with a mean of 9.2&deg; (median 7.2&deg;). The mean position error was 33 pixels (median 23 pixels), compared to the inter-human
 disagreement with a mean of 10 pixels (median 9 pixels).
 
-<img src="https://github.com/kalleknast/head-tracker/tracking_performance.png" width="400" />
+<img src="https://github.com/kalleknast/head-tracker/blob/master/tracking_performance.png" width="400" />
